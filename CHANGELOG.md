@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.16.8] — 2026-09-29
+
 ### Added
 - **`memory.erase` by `id` erases exactly one memory (studio#206).** `memory.erase` now takes
   exactly one of `id` or `scope_prefix`. With `id` it hard-deletes only that memory (graph,
