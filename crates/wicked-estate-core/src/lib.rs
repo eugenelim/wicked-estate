@@ -20,6 +20,7 @@ pub mod error;
 pub mod history;
 pub mod node;
 pub mod observability;
+pub mod path;
 pub mod query;
 pub mod refs;
 pub mod repo;
@@ -48,6 +49,7 @@ pub use observability::{
     SeverityNumber, SpanContext, SpanData, SpanEvent, SpanId, SpanKind, SpanLink, SpanStatus,
     StatusCode, TelemetrySink, TraceId, open_telemetry_sink,
 };
+pub use path::{PathResult, Unresolved, path_between};
 pub use query::{GraphStats, RetrievalResult, Subgraph, SymbolQuery, TraversalSpec};
 pub use refs::{Extraction, UnresolvedRef};
 pub use repo::RepoInfo;
