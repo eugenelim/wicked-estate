@@ -131,6 +131,46 @@ The coverage line is mandatory (agent-behavior rule R3). It tells you:
 A non-zero unresolved count means the blast-radius is a lower bound. The `scip` command raises
 this to a `confidence:1.0` precise tier for TypeScript/JavaScript repos.
 
+### Path — the route from A to B, not just that B is reachable
+
+```bash
+wicked-estate path <from> <to> [--max-depth N] [--json] [--db ...]
+```
+
+Blast-radius answers *which* symbols are connected. `path` answers *how* — the ordered hops, so
+you can name the intermediate functions and open only those files instead of the whole impacted
+set.
+
+```
+$ wicked-estate path http_handler db_write --db graph.db
+3 hop(s) from 'http_handler' to 'db_write':
+  http_handler (src/app.rs:4) -> service_create (src/app.rs:3)  [Calls] confidence 0.65 (scoped-name-resolver)
+  service_create (src/app.rs:3) -> repository_save (src/app.rs:2)  [Calls] confidence 0.65 (scoped-name-resolver)
+  repository_save (src/app.rs:2) -> db_write (src/app.rs:1)  [Calls] confidence 0.65 (scoped-name-resolver)
+```
+
+`<from>` and `<to>` are each an exact symbol name or a `SymbolId` — the form `SearchEntity` and
+`TraverseGraph` hand back, so an agent can pass an id straight through. `--max-depth` accepts
+`1..=16` and defaults to 12; a value above 16 clamps.
+
+Every hop carries the confidence and resolver of the edge it came from, so a heuristic route
+never reads as a proven one (R7). The `0.65` above is `scoped-name-resolver`, not a precise SCIP
+edge.
+
+**Absence is reported honestly** (R3) — three outcomes that must not look alike:
+
+| Outcome | What it means |
+|---|---|
+| `no path found` + `coverage: the whole reachable set was searched` | No route exists. |
+| `no path found` + `bound: the walk reached its depth frontier` | The search was cut off. A route may exist beyond it — raise `--max-depth`. |
+| `no path: '<x>' did not match any symbol name or SymbolId` | You named something that is not in the graph. |
+
+`--json` prints exactly one document with `hops`, `found`, `depth_bounded`, `node_bounded` and
+`unresolved`. Each hop's `source` and `target` are denormalized (`symbol`, `name`, `kind`,
+`file`, `line`, `line_1based`), so a script never needs a second command per hop.
+
+The same query is available to agents as the MCP `Path` tool (§10).
+
 ---
 
 ## 5. Rank — most important symbols (PageRank)

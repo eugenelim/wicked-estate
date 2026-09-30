@@ -107,6 +107,9 @@ wicked-estate index ../wicked-vault  --db graph.db --repo vault
 # Who/what depends on a symbol (blast radius = transitive dependents)
 wicked-estate blast-radius MyClass --db graph.db
 
+# How does A reach B? The ordered hops, each with its edge confidence
+wicked-estate path http_handler db_write --db graph.db
+
 # Find a symbol + print its source
 wicked-estate query handleRequest --db graph.db
 wicked-estate source handleRequest --db graph.db
