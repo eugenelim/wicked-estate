@@ -103,9 +103,13 @@ attached, so the agent can tell a precise hop from a heuristic one.
   `tools/list` count tests in `sc009.rs`, `conformance_schemas.rs`, and
   `wicked-estate-mcp/src/lib.rs` turn green at the new numbers.
 - **CLI `wicked-estate path`: Visual / manual QA**, exercised by an end-to-end
-  test in `crates/wicked-estate/tests/e2e.rs` that indexes a fixture repo with a
-  known call chain and asserts the printed hops; plus a recorded run of the real
-  built binary on that fixture.
+  test in `crates/wicked-estate/tests/path_cli.rs` — a spawn harness following
+  the `repo_flag_cli.rs` precedent, because exit codes, usage lines and `--help`
+  are properties of the binary an in-process test cannot reach. It indexes a
+  fixture repo with a known call chain and asserts the printed hops; plus a
+  recorded run of the real built binary on that fixture. The renderers
+  themselves are asserted in-process against a sink in `main.rs`, since two
+  branches cannot be provoked through a spawned binary at all.
 
 ## Acceptance Criteria
 

@@ -118,7 +118,7 @@ fn load_golden(name: &str) -> Value {
 /// Returns a map from tool name → the full tool Value (with `name`, `description`, `inputSchema`).
 ///
 /// Uses `McpContext::default()` — `embedder_meta_id` is `None` — so the dim-guard always fails
-/// and SemanticSearch is never advertised, giving the stable 24-tool set.
+/// and SemanticSearch is never advertised, giving the stable 30-tool set.
 fn tools_list_map_with_domains() -> HashMap<String, Value> {
     let dir = tempfile::tempdir().expect("create tempdir");
 

@@ -755,6 +755,41 @@ mod shortest_path_tests {
         );
     }
 
+    /// The kind tie-break, which is the sole consumer of `EdgeKind`'s derived `Ord`.
+    ///
+    /// It decides only between two admissible edges sharing BOTH endpoints with different
+    /// kinds — a source that both calls and references the same target. Every other fixture
+    /// builds `Calls` edges only, so without this shape the tie-break key could be deleted
+    /// (and the spine derive with it) and nothing would notice.
+    #[test]
+    fn parallel_edges_of_different_kinds_resolve_deterministically() {
+        let mut g = subgraph(&["A", "B"], &[]);
+        let mut calls = edge(&sym("A"), &sym("B"));
+        calls.kind = EdgeKind::Calls;
+        let mut references = edge(&sym("A"), &sym("B"));
+        references.kind = EdgeKind::References;
+
+        // Both insertion orders must pick the same edge.
+        g.edges = vec![references.clone(), calls.clone()];
+        let first = g.shortest_path(&sym("A"), &[sym("B")]).expect("route");
+        g.edges = vec![calls, references];
+        let second = g.shortest_path(&sym("A"), &[sym("B")]).expect("route");
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(
+            first[0].kind, second[0].kind,
+            "which of two parallel edges the route carries must be a property of the data; \
+             `Calls` sorts before `References` by declaration order in EdgeKind"
+        );
+        assert_eq!(
+            first[0].kind,
+            EdgeKind::Calls,
+            "declaration order decides, and `Calls` is declared first — if this fails \
+             because EdgeKind's variants were reordered, that reordering silently changed \
+             which parallel edge every path query returns"
+        );
+    }
+
     /// The adjacency sort's reason to exist: the route must not depend on the order the
     /// backend happened to return `edges` in. Two subgraphs identical except for edge and
     /// node order must give the identical hop sequence.

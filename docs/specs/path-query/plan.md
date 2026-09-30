@@ -64,8 +64,8 @@ fit is the thing the spec's `Never do` forbids.
 ## Construction tests
 
 **Integration tests:**
-- `crates/wicked-estate/tests/e2e.rs` — index a two-file fixture with a known call
-  chain, run the `path` command path end-to-end, assert the ordered hops and the
+- `crates/wicked-estate/tests/path_cli.rs` — a spawn harness that indexes a fixture
+  with a known call chain and runs the `path` command end-to-end, assert the ordered hops and the
   `--json` document shape.
 - A store-call-counting test (T2) proving one `traverse` per resolved start symbol.
 
@@ -487,7 +487,7 @@ it.
 
 **Depends on:** T2
 
-**Touches:** `crates/wicked-estate/src/main.rs`, `crates/wicked-estate/tests/e2e.rs`
+**Touches:** `crates/wicked-estate/src/main.rs`, `crates/wicked-estate/tests/path_cli.rs`
 
 **Tests:**
 - e2e: index a fixture with a known chain; the text output lists the hops in

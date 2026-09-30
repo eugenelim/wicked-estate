@@ -1566,7 +1566,9 @@ fn main() -> Result<()> {
                     serde_json::to_string(&doc).map_err(|e| anyhow::anyhow!(e))?
                 );
             } else {
-                print_path_text(from, to, &result, max_depth, CLI_MAX_NODES);
+                let mut out = std::io::stdout().lock();
+                write_path_text(&mut out, from, to, &result, max_depth, CLI_MAX_NODES)
+                    .map_err(|e| anyhow::anyhow!(e))?;
             }
             emit_cli_span(
                 &otel_sink,
@@ -4093,61 +4095,76 @@ fn path_json(from: &str, to: &str, r: &wicked_estate_core::PathResult) -> serde_
 }
 
 /// Text mode: one line per hop, then an honest account of any bound that applied.
-fn print_path_text(
+///
+/// Writes to a caller-supplied sink rather than `println!` so every branch has a test that
+/// dies when the branch is removed. Two of them — the node-budget line and the
+/// proven-absence coverage line — cannot be provoked through the spawned binary at all,
+/// because the CLI fixes `max_nodes` at 5 000 (D7); without a sink they were freely
+/// deletable, which for the node-budget line means silently reporting a truncated search as
+/// a proven absence (R3).
+fn write_path_text(
+    out: &mut impl std::io::Write,
     from: &str,
     to: &str,
     r: &wicked_estate_core::PathResult,
     max_depth: u32,
     max_nodes: usize,
-) {
+) -> std::io::Result<()> {
     if let Some(side) = r.unresolved {
-        println!(
+        writeln!(
+            out,
             "no path: '{}' did not match any symbol name or SymbolId",
             if side == wicked_estate_core::Unresolved::From {
                 from
             } else {
                 to
             }
-        );
-        return;
+        )?;
+        return Ok(());
     }
     if r.found {
         if r.hops.is_empty() {
-            println!("'{from}' and '{to}' are the same symbol — zero hops");
+            writeln!(out, "'{from}' and '{to}' are the same symbol — zero hops")?;
         } else {
-            println!("{} hop(s) from '{from}' to '{to}':", r.hops.len());
+            writeln!(out, "{} hop(s) from '{from}' to '{to}':", r.hops.len())?;
             for e in &r.hops {
-                println!(
+                writeln!(
+                    out,
                     "  {} -> {}  [{:?}] confidence {:.2} ({})",
                     path_endpoint_label(&e.source, &r.endpoints),
                     path_endpoint_label(&e.target, &r.endpoints),
                     e.kind,
                     e.confidence.get(),
                     e.resolved_by
-                );
+                )?;
             }
         }
     } else {
-        println!("no path found from '{from}' to '{to}'");
+        writeln!(out, "no path found from '{from}' to '{to}'")?;
     }
     // R3: a bounded search must never read as a proven absence.
     if r.depth_bounded {
-        println!(
+        writeln!(
+            out,
             "bound: the walk reached its depth frontier (--max-depth {max_depth}); \
              a longer route may exist beyond it"
-        );
+        )?;
     }
     if r.node_bounded {
-        println!(
+        writeln!(
+            out,
             "bound: the walk exhausted its node budget ({max_nodes} nodes); \
              the search was cut off"
-        );
+        )?;
     }
     if !r.found && !r.depth_bounded && !r.node_bounded {
-        println!("coverage: the whole reachable set was searched — no route exists");
+        writeln!(
+            out,
+            "coverage: the whole reachable set was searched — no route exists"
+        )?;
     }
+    Ok(())
 }
-
 #[cfg(test)]
 mod path_render_tests {
     use super::*;
@@ -4158,8 +4175,9 @@ mod path_render_tests {
 
     // These branches are unreachable from `tests/path_cli.rs`, which spawns the binary: the
     // CLI fixes `max_nodes` at 5 000 (D7), so the node-budget line cannot be provoked end to
-    // end at all, and each spawn case costs a full `index` run. The renderers are pure
-    // functions of a `PathResult`, so they are asserted directly here.
+    // end at all, and each spawn case costs a full `index` run. `path_json` and
+    // `path_endpoint_json` are pure functions of a `PathResult`; `write_path_text` takes a
+    // sink for the same reason, so all three are asserted directly here.
 
     fn node(id: &str, name: &str) -> Node {
         Node::new(
@@ -4277,5 +4295,104 @@ mod path_render_tests {
         let v = path_endpoint_json(&SymbolId("ghost".into()), &[]);
         assert_eq!(v["symbol"], "ghost");
         assert!(v["name"].is_null());
+    }
+
+    fn rendered(r: &PathResult, from: &str, to: &str, max_nodes: usize) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        write_path_text(&mut buf, from, to, r, 12, max_nodes).expect("write to a Vec");
+        String::from_utf8(buf).expect("utf8")
+    }
+
+    /// R3 on the TEXT surface. Every other test of this distinction goes through `--json`,
+    /// so collapsing the unresolved branch into a bare "no path found" was free.
+    #[test]
+    fn text_unresolved_operand_does_not_read_as_a_proven_absence() {
+        let unresolved = PathResult {
+            unresolved: Some(Unresolved::To),
+            ..Default::default()
+        };
+        let text = rendered(&unresolved, "caller", "ghost", 5_000);
+        assert!(
+            text.contains("ghost"),
+            "the unresolved operand's VALUE must appear: {text}"
+        );
+        assert!(
+            !text.contains("caller"),
+            "and not the operand that did resolve: {text}"
+        );
+        assert!(
+            !text.contains("no route exists"),
+            "an unusable input must not read as a proven absence: {text}"
+        );
+
+        let proven = PathResult::default();
+        let absent = rendered(&proven, "a", "b", 5_000);
+        assert!(
+            absent.contains("no route exists"),
+            "a genuine absence says so: {absent}"
+        );
+        assert_ne!(
+            text, absent,
+            "the two cases must not render identically — that is the R3 failure"
+        );
+    }
+
+    /// The node-budget line. D7 fixes the CLI budget at 5 000, so the spawn fixtures cannot
+    /// provoke this at all; without the sink it had no test and deleting it would report a
+    /// truncated search as a proven absence.
+    #[test]
+    fn text_names_the_node_budget_when_it_bound() {
+        let bounded = PathResult {
+            node_bounded: true,
+            ..Default::default()
+        };
+        let text = rendered(&bounded, "a", "b", 5_000);
+        assert!(text.contains("node budget"), "{text}");
+        assert!(
+            text.contains("5000"),
+            "the budget that bound must be named: {text}"
+        );
+        assert!(
+            !text.contains("no route exists"),
+            "a node-bounded search is not a proven absence: {text}"
+        );
+    }
+
+    #[test]
+    fn text_names_the_depth_frontier_when_it_bound() {
+        let bounded = PathResult {
+            depth_bounded: true,
+            ..Default::default()
+        };
+        let text = rendered(&bounded, "a", "b", 5_000);
+        assert!(text.contains("depth frontier"), "{text}");
+        assert!(!text.contains("no route exists"), "{text}");
+    }
+
+    #[test]
+    fn text_renders_one_line_per_hop_with_name_and_location() {
+        let text = rendered(&found_result(), "a_fn", "b_fn", 5_000);
+        let hops: Vec<&str> = text.lines().filter(|l| l.contains("->")).collect();
+        assert_eq!(hops.len(), 1);
+        assert!(hops[0].contains("a_fn (src/a.rs:1)"), "{}", hops[0]);
+        assert!(hops[0].contains("b_fn (src/a.rs:1)"), "{}", hops[0]);
+        assert!(hops[0].contains("confidence"), "{}", hops[0]);
+    }
+
+    #[test]
+    fn text_zero_hop_identity_route_says_so() {
+        let same = PathResult {
+            found: true,
+            ..Default::default()
+        };
+        let text = rendered(&same, "x", "x", 5_000);
+        assert!(text.contains("same symbol"), "{text}");
+        assert!(!text.contains("no path"), "{text}");
+    }
+
+    /// The text label's fallback arm, symmetric with the JSON twin's.
+    #[test]
+    fn text_label_falls_back_to_the_bare_id() {
+        assert_eq!(path_endpoint_label(&SymbolId("ghost".into()), &[]), "ghost");
     }
 }

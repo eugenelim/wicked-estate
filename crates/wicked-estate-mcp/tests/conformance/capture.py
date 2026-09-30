@@ -95,6 +95,7 @@ REPRESENTATIVE_CALLS = {
     "SearchEntity":               {"name": SEED_SYMBOL_NAME, "limit": 5},
     "RetrieveEntity":             {"symbol": SEED_SYMBOL_ID},       # param is "symbol", NOT "symbol_id"
     "TraverseGraph":              {"symbol": SEED_SYMBOL_ID, "direction": "dependencies", "depth": 1},  # direction enum NOT "outbound"; depth NOT max_depth
+    "Path":                       {"from": SEED_SYMBOL_ID, "to": SEED_SYMBOL_ID},  # name or SymbolId; a same-symbol route is a found zero-hop result
     "BlastRadius":                {"symbol": SEED_SYMBOL_ID, "depth": 1},  # param is "symbol", NOT "symbol_id"; depth NOT max_depth
     "FetchContent":               {"symbol": SEED_SYMBOL_ID},       # param is "symbol", NOT "symbol_id"
     "ContextBundle":              {"symbol": SEED_SYMBOL_ID},       # param is "symbol", NOT "target"

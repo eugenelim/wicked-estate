@@ -52,8 +52,10 @@ fn indexed_chain(tag: &str, depth: usize) -> Scratch {
     }
     fs::write(d.join("src/a.rs"), src).unwrap();
 
+    // Take ownership BEFORE the fallible step, so a failed index cleans up too.
+    let scratch = Scratch(d);
     let out = Command::new(bin())
-        .current_dir(&d)
+        .current_dir(&*scratch)
         .args(["index", ".", "--db", "graph.db"])
         .output()
         .expect("spawn index");
@@ -62,7 +64,7 @@ fn indexed_chain(tag: &str, depth: usize) -> Scratch {
         "index failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    Scratch(d)
+    scratch
 }
 
 fn path_in(dir: &Path, args: &[&str]) -> Output {

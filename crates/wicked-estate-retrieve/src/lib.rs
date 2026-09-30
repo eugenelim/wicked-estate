@@ -912,23 +912,55 @@ impl RetrievalTool for Path {
     }
 
     fn invoke(&self, store: &dyn GraphRead, request: &Value) -> Result<RetrievalResult> {
-        let empty = |diag: Vec<String>| RetrievalResult {
+        // Every no-route reply is built here, and the builder REQUIRES the reason. A branch
+        // cannot hand-build `unresolved: null` — the wire shape the spec licenses a reader to
+        // treat as "no route exists in the graph" — for a case that has not earned it. Round 1
+        // fixed `depth: 0` emitting that shape; round 2 found the same class one branch over,
+        // which is what this constructor exists to make impossible (CLAUDE.md §11: fix at the
+        // seam, not in N copies).
+        let no_route = |unresolved: Option<&str>, diag: Vec<String>| RetrievalResult {
             content: json!({
                 "hops": [], "found": false,
-                "depth_bounded": false, "node_bounded": false, "unresolved": null
+                "depth_bounded": false, "node_bounded": false,
+                "unresolved": unresolved,
             }),
             diagnostics: diag,
         };
 
-        let from = request.get("from").and_then(|v| v.as_str()).unwrap_or("");
-        let to = request.get("to").and_then(|v| v.as_str()).unwrap_or("");
-        if from.is_empty() || to.is_empty() {
-            let missing = if from.is_empty() { "from" } else { "to" };
-            return Ok(empty(vec![
-                staleness_note(),
-                format!("Path: '{missing}' field is required"),
-            ]));
-        }
+        // An operand is unusable if it is absent, not a string, or empty. All three are
+        // unresolved INPUT, not absence of a route, and the schema's `minLength` does not
+        // relieve this surface of checking: a non-conforming client still reaches here.
+        let operand = |key: &str| -> Option<&str> {
+            match request.get(key) {
+                Some(Value::String(v)) if !v.is_empty() => Some(v.as_str()),
+                _ => None,
+            }
+        };
+        let (from, to) = match (operand("from"), operand("to")) {
+            (Some(f), Some(t)) => (f, t),
+            (None, _) => {
+                return Ok(no_route(
+                    Some("from"),
+                    vec![
+                        staleness_note(),
+                        "Path: the 'from' operand is missing, empty, or not a string — this \
+                         is an unusable input, not a proven absence"
+                            .to_string(),
+                    ],
+                ));
+            }
+            (_, None) => {
+                return Ok(no_route(
+                    Some("to"),
+                    vec![
+                        staleness_note(),
+                        "Path: the 'to' operand is missing, empty, or not a string — this is \
+                         an unusable input, not a proven absence"
+                            .to_string(),
+                    ],
+                ));
+            }
+        };
 
         // Floor as well as clamp. A `depth` of 0 expands nothing, so no node ever reaches
         // the frontier and `depth_bounded` stays false — the response would then claim the
@@ -3380,6 +3412,38 @@ mod tests {
         }
     }
 
+    /// Round 2's R3 defect: an operand that is present but empty (or not a string) used to
+    /// return `unresolved: null` — byte-identical to the wire shape the spec licenses a
+    /// reader to treat as "no route exists in the graph" — while the diagnostic called a
+    /// present operand "required". Every no-route reply now goes through one constructor
+    /// that requires the reason, so no branch can fabricate that shape.
+    #[test]
+    fn path_unusable_operand_is_never_a_proven_absence() {
+        let store = fixture_store();
+        let cases = [
+            (json!({"from": "caller_fn", "to": ""}), "to"),
+            (json!({"from": "", "to": "leaf_fn"}), "from"),
+            (json!({"from": "caller_fn", "to": 42}), "to"),
+            (json!({"from": null, "to": "leaf_fn"}), "from"),
+            (json!({"to": "leaf_fn"}), "from"),
+        ];
+        for (req, side) in cases {
+            let res = Path.invoke(&store, &req).unwrap();
+            assert_eq!(res.content["found"], false, "{req}");
+            assert_eq!(
+                res.content["unresolved"], side,
+                "an unusable '{side}' operand must be distinguishable from a proven \
+                 absence in the structured content: {req}"
+            );
+            let diag = res.diagnostics.join("\n");
+            assert!(diag.contains("not a proven absence"), "{req}: {diag}");
+            assert!(
+                !diag.contains("no route exists"),
+                "{req} must not claim the reachable set was searched: {diag}"
+            );
+        }
+    }
+
     #[test]
     fn path_missing_required_field_names_it() {
         let store = fixture_store();
@@ -3392,8 +3456,8 @@ mod tests {
             assert!(
                 res.diagnostics
                     .iter()
-                    .any(|d| d.contains(&format!("'{missing}' field is required"))),
-                "must name the missing field, got {:?}",
+                    .any(|d| d.contains(&format!("the '{missing}' operand"))),
+                "must name the unusable operand, got {:?}",
                 res.diagnostics
             );
         }

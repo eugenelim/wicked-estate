@@ -728,7 +728,7 @@ pub struct DomainHandles<'a> {
 
 /// Unified routing entry-point: estate tools + optional memory/knowledge tools + resources/prompts.
 ///
-/// `domains = None` → estate-only mode (12/13 tools). `domains = Some(...)` → 24+ tools, resources,
+/// `domains = None` → estate-only mode (12/13 tools). `domains = Some(...)` → 30 tools, resources,
 /// and prompts. Memory/knowledge tools that arrive without domains return a clean JSON-RPC error.
 /// `semantic` is the live SemanticSearch instance; when `None` the tool is neither advertised nor
 /// dispatchable (consistent fail-closed, same as the dim-guard behaviour in the old path).

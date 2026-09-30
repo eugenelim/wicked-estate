@@ -142,3 +142,85 @@ you are proud of.
   criterion, rule or defect named.
 - The spec's unchecked criteria and `Status: Approved`: finish-checklist work not yet due at
   review time, not a defect in the reviewed target.
+
+## Post-gates review round 2 (2026-09-30)
+
+`adversarial-reviewer`: 5 sustained / 3 refuted. `quality-engineer`: 5 sustained / 2 refuted
+(after a re-adjudication — see below).
+
+### The R3 class, and why it took three rounds
+
+Round 1 fixed MCP `depth: 0` emitting a proven-absence claim. Round 2 found the same class
+one branch over: an operand that is **present but empty** (or not a string) short-circuited
+before `path_between` and returned `{found:false, depth_bounded:false, node_bounded:false,
+unresolved:null}` — byte-identical to the shape the spec licenses a reader to treat as "no
+route exists" — while the diagnostic called a present operand "required". The CLI handled the
+same input correctly, so the two surfaces disagreed.
+
+That is a CLAUDE.md §11 failure on my part: a fix in one place is a hypothesis about all the
+others, and I applied the `depth` fix without re-auditing the sibling early returns.
+
+**Fixed at the seam, not the site.** Every no-route reply in the `Path` tool now goes through
+one constructor that *requires* the reason:
+
+```rust
+let no_route = |unresolved: Option<&str>, diag: Vec<String>| …
+```
+
+A branch can no longer hand-build `unresolved: null` for a case that has not earned it. That
+is what stops a round 3 from finding a fourth instance.
+
+Round 2 also found the same property unpinned on the **text** surface: every unresolved-vs-
+absence test went through `--json`, so collapsing the text branch into a bare "no path found"
+was free. `print_path_text` became `write_path_text(&mut impl Write, …)`, because two of its
+branches — the node-budget line and the proven-absence coverage line — cannot be provoked
+through a spawned binary at all (D7 fixes the CLI budget at 5 000), and the module doc
+claimed they were asserted in-process when nothing called the function.
+
+### Falsifiers added, each mutation-confirmed to die
+
+| Mechanism | Mutant | Test that now dies |
+| --- | --- | --- |
+| shortest across `from` candidates | `best.is_none()` | `shortest_route_wins_across_from_candidates` |
+| edge-kind tie-break (and the `EdgeKind` `Ord` derive) | drop `.then_with(…kind…)` | `parallel_edges_of_different_kinds_resolve_deterministically` |
+| text unresolved branch | collapse to "no path found" | `text_unresolved_operand_does_not_read_as_a_proven_absence` |
+
+The first two had no fixture of the right *shape*: every multi-match test had one routing
+candidate or two of equal length, and every fixture built `Calls` edges only, so the
+comparison and the tie-break decided nothing observable.
+
+### The `max_nodes` floor is defensive, not load-bearing
+
+Adjudicated advisory, and the proposed test repair was ruled **wrong**. Tracing `max_nodes: 0`
+through all three backends: `MemStore` sets `truncated` at the first neighbour
+(`sub_nodes.len() >= 0`), `SqliteStore` issues `LIMIT 0` so `depths.len() >= 0` holds, and
+`PostgresStore` fetches `max_nodes + 1` and flags `raw.len() > 0`. In every case
+`node_bounded` is true, so the reply is an honest bounded absence and R3 holds. The floor is
+therefore not the `depth: 0` defect's sibling — depth 0 genuinely produced a false proven
+absence and `max_nodes: 0` does not. No test at the designated `MemStore` seam can kill the
+floor, because 0 and 1 are observationally identical there. Recorded rather than pinned.
+
+### An invalid adjudication, and what was done about it
+
+The first `quality-engineer` adjudication emitted a bare `ADJUDICATION-INDETERMINATE` token
+and retracted it in prose. `review inspect` classified it `invalid (indeterminate-present)`,
+which is a fail-closed stop; the bounded evidence-retry route needs a pre-declared gate
+catalog this repository does not have. Its findings were legible and I agreed with them,
+which is exactly why acting on them would have made the gate decorative. The owner chose
+re-adjudication; a fresh verdict over the unchanged findings came back valid, and two of the
+reviewer's seven findings were refuted on that pass.
+
+### Refuted, and kept refuted
+
+- **Candidate fan-out** (third time): the plan's Risks records it, and a cap would collide
+  with the shortest-over-every-pair criterion.
+- **R4 crossover at ~216 chars**: the arithmetic is right, but reaching it needs symbol ids
+  *and* names *and* file paths to average >215 characters simultaneously; with realistic
+  names (~40) and repo-relative paths (~80) the ids would need ~490, far beyond what
+  `Symbol`'s `Display` produces. A measured identifier-length distribution would be the new
+  evidence that reopens it.
+- **`EdgeKind` absent from `What Changes`**: the Interface-compatibility row is scoped to
+  tools, traits and schemas with a closeout of `traits.rs` and `store/src`; an additive
+  derive touches neither.
+- **`ids.dedup()` as dead code**: `GraphRead::find_symbols` documents no uniqueness
+  guarantee, so removing it at a `&dyn` seam is unsafe for an out-of-tree store.

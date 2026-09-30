@@ -579,3 +579,48 @@ fn same_symbol_is_found_with_zero_hops_at_the_seam() {
     assert_eq!(r.unresolved, None);
     assert!(!r.depth_bounded && !r.node_bounded);
 }
+
+/// The cross-`from`-candidate comparison, which nothing else observes.
+///
+/// Every other multi-match test has either one routing candidate or two of equal length, so
+/// `hops.len() < current.len()` and "first candidate that finds anything wins" answer
+/// identically. Here the EARLIER-sorting candidate reaches the goal by the longer route, so
+/// taking the first would return a 3-hop detour while a 1-hop route exists.
+#[test]
+fn shortest_route_wins_across_from_candidates() {
+    // "a_long" sorts before "z_short"; only the second has the short route.
+    let nodes = vec![
+        named_node("a_long", "start"),
+        named_node("z_short", "start"),
+        node("mid1"),
+        node("mid2"),
+        node("goal"),
+    ];
+    let edges = vec![
+        edge("a_long", "mid1"),
+        edge("mid1", "mid2"),
+        edge("mid2", "goal"),
+        edge("z_short", "goal"),
+    ];
+
+    for (label, hops) in [
+        (
+            "mem",
+            path_between(&mem(&nodes, &edges), "start", "goal", 8, 5_000),
+        ),
+        (
+            "sqlite",
+            path_between(&sqlite(&nodes, &edges), "start", "goal", 8, 5_000),
+        ),
+    ] {
+        let r = hops.expect("query");
+        assert!(r.found, "{label}");
+        assert_eq!(
+            r.hops.len(),
+            1,
+            "{label}: the shortest route across candidates is 1 hop, not the \
+             earlier-sorting candidate's 3-hop detour"
+        );
+        assert_eq!(r.hops[0].source, sym("z_short"), "{label}");
+    }
+}
