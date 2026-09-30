@@ -1488,6 +1488,103 @@ fn main() -> Result<()> {
                 t_cmd_end,
             );
         }
+        // ── path ────────────────────────────────────────────────────────────
+        //   wicked-estate path <from> <to> [--max-depth N] [--json]
+        //
+        // The shared parser pushes every token it does not know into `positional`, so
+        // `--max-depth` and `--json` arrive here as ordinary strings. A one-operand command
+        // like `blast-radius` can scan for `--json` and ignore the rest; a two-operand one
+        // cannot — `path A --json` would otherwise resolve `to` to "--json". So every token
+        // is classified before either operand is read.
+        "path" => {
+            const DEFAULT_MAX_DEPTH: u32 = 12; // matches `blast-radius`
+            const MAX_MAX_DEPTH: u32 = 16;
+            const CLI_MAX_NODES: usize = 5_000;
+            const USAGE: &str = "usage: wicked-estate path <from> <to> [--max-depth N] [--json] [--db ...]\n\
+                 <from> and <to> are each an exact symbol name or a SymbolId; \
+                 --max-depth accepts 1..=16 (default 12, values above 16 clamp to 16)";
+
+            let mut json_out = false;
+            let mut max_depth = DEFAULT_MAX_DEPTH;
+            let mut operands: Vec<&String> = Vec::new();
+            {
+                let mut it = positional.iter();
+                while let Some(a) = it.next() {
+                    match a.as_str() {
+                        "--json" => json_out = true,
+                        "--max-depth" => {
+                            let Some(v) = it.next() else {
+                                anyhow::bail!("{USAGE}\n--max-depth requires a value");
+                            };
+                            let parsed: u32 = v.parse().map_err(|_| {
+                                anyhow::anyhow!(
+                                    "{USAGE}\n--max-depth must be an integer, got {v:?}"
+                                )
+                            })?;
+                            if parsed == 0 {
+                                anyhow::bail!("{USAGE}\n--max-depth must be at least 1, got 0");
+                            }
+                            max_depth = parsed.min(MAX_MAX_DEPTH);
+                        }
+                        other if other.starts_with("--") => {
+                            anyhow::bail!("{USAGE}\nunknown flag {other:?}");
+                        }
+                        _ => operands.push(a),
+                    }
+                }
+            }
+            if operands.len() != 2 {
+                anyhow::bail!(
+                    "{USAGE}\nexpected exactly two operands (<from> and <to>), got {}",
+                    operands.len()
+                );
+            }
+            let (from, to) = (operands[0].as_str(), operands[1].as_str());
+
+            let store = open_store_ext(&db).map_err(to_any)?;
+            // Machine output must be exactly one JSON document — notices would corrupt it.
+            if !json_out {
+                maybe_print_staleness(store.as_ref(), &db);
+                maybe_warn_version_mismatch(store.as_ref(), &db);
+            }
+            let t_cmd_start = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+            let result =
+                wicked_estate_core::path_between(&*store, from, to, max_depth, CLI_MAX_NODES)
+                    .map_err(to_any)?;
+            let t_cmd_end = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+
+            if json_out {
+                let doc = path_json(from, to, &result);
+                println!(
+                    "{}",
+                    serde_json::to_string(&doc).map_err(|e| anyhow::anyhow!(e))?
+                );
+            } else {
+                print_path_text(from, to, &result, max_depth, CLI_MAX_NODES);
+            }
+            emit_cli_span(
+                &otel_sink,
+                &otel_resource,
+                &otel_scope,
+                "wicked_estate.path",
+                vec![
+                    wicked_estate_core::observability::KeyValue::str("path.from", from),
+                    wicked_estate_core::observability::KeyValue::str("path.to", to),
+                    wicked_estate_core::observability::KeyValue::int(
+                        "path.hops",
+                        result.hops.len() as i64,
+                    ),
+                ],
+                t_cmd_start,
+                t_cmd_end,
+            );
+        }
         "stats" => {
             let store = open_store_ext(&db).map_err(to_any)?;
             maybe_print_staleness(store.as_ref(), &db);
@@ -3611,6 +3708,13 @@ fn main() -> Result<()> {
             );
             println!("  wicked-estate query <name>          [--db ...]");
             println!("  wicked-estate blast-radius <name>   [--depth N] [--json] [--db ...]");
+            println!("  wicked-estate path <from> <to>      [--max-depth N] [--json] [--db ...]");
+            println!(
+                "    The ordered hops from <from> to <to> — each with its edge kind and confidence."
+            );
+            println!(
+                "    <from>/<to>: exact symbol name or SymbolId. --max-depth 1..=16 (default 12)."
+            );
             println!(
                 "  wicked-estate rank                  [--db ...]  # most important symbols (PageRank)"
             );
@@ -3914,5 +4018,132 @@ mod ensure_db_dir_tests {
         let db = tmp.path().join("nested/dir/graph.db");
         ensure_db_dir(db.to_str().unwrap()).unwrap();
         assert!(db.parent().unwrap().is_dir());
+    }
+}
+
+// ─── path rendering ───────────────────────────────────────────────────────────
+
+/// One denormalized hop endpoint — the same six fields the MCP `Path` tool emits, so a
+/// script reading `--json` learns each hop's file and line without a second command.
+///
+/// Built from `PathResult::endpoints`, never from a store lookup: the traversal already
+/// returned these nodes. (The MCP side reuses `edge_json`, which is private to
+/// `wicked-estate-retrieve`; the shared thing across the two surfaces is the `PathResult`,
+/// not the renderer.)
+fn path_endpoint_json(
+    id: &wicked_estate_core::SymbolId,
+    endpoints: &[wicked_estate_core::Node],
+) -> serde_json::Value {
+    match endpoints.iter().find(|n| &n.symbol == id) {
+        Some(n) => serde_json::json!({
+            "symbol": n.symbol.as_str(),
+            "name": n.name,
+            "kind": &n.kind,
+            "file": n.location.file,
+            "line": n.location.span.start_line,
+            "line_1based": n.location.span.start_line + 1,
+        }),
+        // Unreachable while the edge-admission rule holds; emit the bare id rather than
+        // drop the hop, so the route stays traceable if it ever does.
+        None => serde_json::json!({ "symbol": id.as_str() }),
+    }
+}
+
+/// A hop endpoint for human eyes: `name (file:line)`.
+///
+/// A raw `SymbolId` is a long structured blob (`ts-rust . . . src/app/handler().`); the
+/// point of this command is that a reader can name the intermediate functions and open
+/// them, so the name and location lead. Resolved from `PathResult::endpoints`, so this
+/// costs no store lookup; falls back to the id if an endpoint is somehow absent.
+fn path_endpoint_label(
+    id: &wicked_estate_core::SymbolId,
+    endpoints: &[wicked_estate_core::Node],
+) -> String {
+    match endpoints.iter().find(|n| &n.symbol == id) {
+        Some(n) => format!("{} ({})", n.name, loc(n)),
+        None => id.as_str().to_string(),
+    }
+}
+
+/// The `--json` document: exactly one object on stdout.
+fn path_json(from: &str, to: &str, r: &wicked_estate_core::PathResult) -> serde_json::Value {
+    let hops: Vec<serde_json::Value> = r
+        .hops
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "source": path_endpoint_json(&e.source, &r.endpoints),
+                "target": path_endpoint_json(&e.target, &r.endpoints),
+                "kind": &e.kind,
+                "confidence": e.confidence.get(),
+                "provenance": &e.provenance,
+                "resolved_by": e.resolved_by,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "from": from,
+        "to": to,
+        "hops": hops,
+        "found": r.found,
+        "depth_bounded": r.depth_bounded,
+        "node_bounded": r.node_bounded,
+        "unresolved": r.unresolved.map(|u| u.as_str()),
+    })
+}
+
+/// Text mode: one line per hop, then an honest account of any bound that applied.
+fn print_path_text(
+    from: &str,
+    to: &str,
+    r: &wicked_estate_core::PathResult,
+    max_depth: u32,
+    max_nodes: usize,
+) {
+    if let Some(side) = r.unresolved {
+        println!(
+            "no path: '{}' did not match any symbol name or SymbolId",
+            if side == wicked_estate_core::Unresolved::From {
+                from
+            } else {
+                to
+            }
+        );
+        return;
+    }
+    if r.found {
+        if r.hops.is_empty() {
+            println!("'{from}' and '{to}' are the same symbol — zero hops");
+        } else {
+            println!("{} hop(s) from '{from}' to '{to}':", r.hops.len());
+            for e in &r.hops {
+                println!(
+                    "  {} -> {}  [{:?}] confidence {:.2} ({})",
+                    path_endpoint_label(&e.source, &r.endpoints),
+                    path_endpoint_label(&e.target, &r.endpoints),
+                    e.kind,
+                    e.confidence.get(),
+                    e.resolved_by
+                );
+            }
+        }
+    } else {
+        println!("no path found from '{from}' to '{to}'");
+    }
+    // R3: a bounded search must never read as a proven absence.
+    if r.depth_bounded {
+        println!(
+            "bound: the walk reached its depth frontier (--max-depth {max_depth}); \
+             a longer route may exist beyond it"
+        );
+    }
+    if r.node_bounded {
+        println!(
+            "bound: the walk exhausted its node budget ({max_nodes} nodes); \
+             the search was cut off"
+        );
+    }
+    if !r.found && !r.depth_bounded && !r.node_bounded {
+        println!("coverage: the whole reachable set was searched — no route exists");
     }
 }
