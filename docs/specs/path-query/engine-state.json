@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "run_id": "ec89ee4d-8358-4dd9-9eeb-e9bc59fa81c8",
+  "feature": "path-query",
+  "mode": "code",
+  "state": "SPEC-PLAN-REVIEW",
+  "last_event": "spec-ready",
+  "last_event_context": null,
+  "transition_sequence": 25,
+  "last_transition_at": "2026-09-30T06:10:09Z",
+  "gate_question": null
+}

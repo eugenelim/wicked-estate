@@ -44,3 +44,7 @@ site/*.db.mem*
 site/*.db.knowledge*
 .product/
 node_modules/
+.loop-run/
+
+# work-loop session artifacts (raw reviewer reports, adjudications)
+.context/
