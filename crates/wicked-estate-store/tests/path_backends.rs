@@ -506,3 +506,76 @@ fn node_bounded_is_a_disjunction_across_candidates() {
         "one candidate's walk was node-capped; the flag is a disjunction, not the winner's"
     );
 }
+
+/// Endpoint completeness on **SqliteStore**, on a route that terminates at the depth
+/// frontier — the shape the admission rule exists for.
+///
+/// The MemStore version of this test cannot catch a SQLite-side regression: SqliteStore is
+/// the backend that induces edges to symbols it does not return as nodes, so it is the one
+/// where a missing endpoint would ship the bare-id fallback — a hop with no name, file or
+/// line, which is the whole value of the feature.
+#[test]
+fn endpoints_are_complete_on_sqlite_at_the_depth_frontier() {
+    let (nodes, edges) = chain(6);
+    let store = sqlite(&nodes, &edges);
+    // depth 3 on a 6-hop chain: the route to a3 ends exactly at the frontier, and the
+    // traversal has induced edges beyond it.
+    let r = path_between(&store, "a0", "a3", 3, 5_000).expect("query");
+    assert!(r.found, "a3 is three hops out");
+    assert!(r.depth_bounded, "the walk reached its frontier");
+
+    let have: std::collections::HashSet<&str> =
+        r.endpoints.iter().map(|n| n.symbol.as_str()).collect();
+    for hop in &r.hops {
+        assert!(
+            have.contains(hop.source.as_str()) && have.contains(hop.target.as_str()),
+            "every hop endpoint must be in `endpoints` on SqliteStore too; missing one \
+             ships a hop with no name, file or line"
+        );
+    }
+    for n in &r.endpoints {
+        assert!(!n.name.is_empty(), "endpoint nodes carry their name");
+        assert!(!n.location.file.is_empty(), "and their file");
+    }
+}
+
+/// Stability that is about something: the same graph inserted in two different orders must
+/// give the same route. Calling the same function twice on one store proves only that it is
+/// a function.
+#[test]
+fn multi_match_winner_is_stable_across_insertion_order() {
+    let forward = vec![
+        named_node("g_near", "goal"),
+        named_node("g_far", "goal"),
+        node("start"),
+        node("mid"),
+    ];
+    let mut reversed = forward.clone();
+    reversed.reverse();
+    let edges = vec![
+        edge("start", "g_near"),
+        edge("start", "mid"),
+        edge("mid", "g_far"),
+    ];
+
+    let a = path_between(&mem(&forward, &edges), "start", "goal", 8, 5_000).expect("a");
+    let b = path_between(&mem(&reversed, &edges), "start", "goal", 8, 5_000).expect("b");
+    assert_eq!(
+        hop_ids(&a.hops),
+        hop_ids(&b.hops),
+        "insertion order must not decide the winner"
+    );
+    assert_eq!(a.hops[0].target, sym("g_near"), "and the nearer one wins");
+}
+
+/// `from == to` is a found route of zero hops at the seam, distinct from an absence.
+#[test]
+fn same_symbol_is_found_with_zero_hops_at_the_seam() {
+    let (nodes, edges) = chain(2);
+    let store = mem(&nodes, &edges);
+    let r = path_between(&store, "a0", "a0", 8, 5_000).expect("query");
+    assert!(r.found, "the identity route exists");
+    assert!(r.hops.is_empty());
+    assert_eq!(r.unresolved, None);
+    assert!(!r.depth_bounded && !r.node_bounded);
+}

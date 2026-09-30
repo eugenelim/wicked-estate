@@ -4147,3 +4147,135 @@ fn print_path_text(
         println!("coverage: the whole reachable set was searched — no route exists");
     }
 }
+
+#[cfg(test)]
+mod path_render_tests {
+    use super::*;
+    use wicked_estate_core::path::{PathResult, Unresolved};
+    use wicked_estate_core::{
+        Edge, EdgeKind, Language, Location, Node, NodeKind, ResolutionTier, Span, SymbolId,
+    };
+
+    // These branches are unreachable from `tests/path_cli.rs`, which spawns the binary: the
+    // CLI fixes `max_nodes` at 5 000 (D7), so the node-budget line cannot be provoked end to
+    // end at all, and each spawn case costs a full `index` run. The renderers are pure
+    // functions of a `PathResult`, so they are asserted directly here.
+
+    fn node(id: &str, name: &str) -> Node {
+        Node::new(
+            SymbolId(id.into()),
+            NodeKind::Function,
+            name,
+            Language::new("rust"),
+            Location::new("src/a.rs", Span::ZERO),
+        )
+    }
+
+    fn hop(from: &str, to: &str) -> Edge {
+        Edge::new(
+            SymbolId(from.into()),
+            SymbolId(to.into()),
+            EdgeKind::Calls,
+            ResolutionTier::Parsed,
+            "test",
+        )
+    }
+
+    fn found_result() -> PathResult {
+        PathResult {
+            hops: vec![hop("a", "b")],
+            endpoints: vec![node("a", "a_fn"), node("b", "b_fn")],
+            found: true,
+            depth_bounded: false,
+            node_bounded: false,
+            unresolved: None,
+        }
+    }
+
+    #[test]
+    fn json_endpoints_carry_the_six_fields_from_endpoints_not_a_lookup() {
+        let doc = path_json("a_fn", "b_fn", &found_result());
+        let hop = &doc["hops"][0];
+        for end in ["source", "target"] {
+            for field in ["symbol", "name", "kind", "file", "line", "line_1based"] {
+                assert!(
+                    !hop[end][field].is_null(),
+                    "{end}.{field} must render from PathResult::endpoints"
+                );
+            }
+        }
+        assert_eq!(doc["unresolved"], serde_json::Value::Null);
+    }
+
+    /// The CLI and the MCP tool are required to emit the same six endpoint fields. They use
+    /// separate renderers (D9), so nothing but this test stops one from drifting.
+    #[test]
+    fn cli_endpoint_field_set_matches_the_mcp_tool() {
+        let doc = path_json("a_fn", "b_fn", &found_result());
+        let mut cli: Vec<&str> = doc["hops"][0]["source"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        cli.sort_unstable();
+        // The set `wicked-estate-retrieve::endpoint_json` emits; that helper is private to
+        // its crate, so the contract is pinned by value here rather than by calling it.
+        let mut mcp = vec!["symbol", "name", "kind", "file", "line", "line_1based"];
+        mcp.sort_unstable();
+        assert_eq!(
+            cli, mcp,
+            "the CLI --json endpoint shape must match the MCP tool's; the two renderers are \
+             separate (D9) and only this assertion holds them together"
+        );
+    }
+
+    #[test]
+    fn unresolved_to_names_the_to_operand_not_the_from_one() {
+        let r = PathResult {
+            unresolved: Some(Unresolved::To),
+            ..Default::default()
+        };
+        let doc = path_json("resolvable", "missing", &r);
+        assert_eq!(doc["unresolved"], "to");
+        assert_eq!(doc["found"], false);
+    }
+
+    #[test]
+    fn json_reports_each_bound_separately() {
+        let bounded = PathResult {
+            depth_bounded: true,
+            node_bounded: true,
+            ..Default::default()
+        };
+        let doc = path_json("a", "b", &bounded);
+        assert_eq!(doc["found"], false);
+        assert_eq!(doc["depth_bounded"], true);
+        assert_eq!(doc["node_bounded"], true);
+        assert_eq!(
+            doc["unresolved"],
+            serde_json::Value::Null,
+            "a bounded absence is not an unresolved input"
+        );
+    }
+
+    #[test]
+    fn zero_hop_identity_route_is_found() {
+        let r = PathResult {
+            found: true,
+            ..Default::default()
+        };
+        let doc = path_json("same", "same", &r);
+        assert_eq!(doc["found"], true);
+        assert_eq!(doc["hops"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn endpoint_absent_from_endpoints_falls_back_to_the_bare_id() {
+        // Unreachable while the edge-admission rule holds, but the route must stay
+        // traceable rather than lose the hop if it ever does.
+        let v = path_endpoint_json(&SymbolId("ghost".into()), &[]);
+        assert_eq!(v["symbol"], "ghost");
+        assert!(v["name"].is_null());
+    }
+}

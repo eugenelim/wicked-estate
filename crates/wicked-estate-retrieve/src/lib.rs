@@ -930,16 +930,24 @@ impl RetrievalTool for Path {
             ]));
         }
 
-        let max_depth = opt_u64(request, "depth").unwrap_or(8).min(16) as u32;
-        let max_nodes = opt_u64(request, "max_nodes").unwrap_or(1_000).min(5_000) as usize;
+        // Floor as well as clamp. A `depth` of 0 expands nothing, so no node ever reaches
+        // the frontier and `depth_bounded` stays false — the response would then claim the
+        // whole reachable set was searched for a search that visited nothing, which is the
+        // R3 proven-absence failure. `as_u64` also yields None for a negative or fractional
+        // value, which falls back to the default rather than silently searching at 0.
+        let max_depth = opt_u64(request, "depth").unwrap_or(8).clamp(1, 16) as u32;
+        let max_nodes = opt_u64(request, "max_nodes")
+            .unwrap_or(1_000)
+            .clamp(1, 5_000) as usize;
 
         let result = wicked_estate_core::path_between(store, from, to, max_depth, max_nodes)?;
         let mut diag = vec![staleness_note()];
 
         if let Some(side) = result.unresolved {
             diag.push(format!(
-                "Path: '{}' matched no symbol name and no live node id — this is an \
-                 unresolved input, not a proven absence",
+                "Path: the '{}' operand '{}' matched no symbol name and no live node id — \
+                 this is an unresolved input, not a proven absence",
+                side.as_str(),
                 if side == wicked_estate_core::Unresolved::From {
                     from
                 } else {
@@ -3508,18 +3516,181 @@ mod tests {
         }
     }
 
+    /// The depth clamp must be OBSERVABLE. A 16-hop chain found at `depth: 99` proves
+    /// nothing — it is found whether 99 clamps to 16 or passes through raw. A 20-hop chain
+    /// must NOT be found, which is true only if the clamp applies.
     #[test]
-    fn path_clamps_depth_and_node_budget() {
-        let store = path_chain_store(16, 0);
-        // depth 99 clamps to 16, so a 16-hop chain is still found.
+    fn path_depth_clamp_is_falsifiable() {
+        let store = path_chain_store(20, 0);
         let res = Path
             .invoke(
                 &store,
-                &json!({"from": "name_f0_", "to": "name_f16_", "depth": 99, "max_nodes": 99_999}),
+                &json!({"from": "name_f0_", "to": "name_f20_", "depth": 99}),
             )
             .unwrap();
+        assert_eq!(
+            res.content["found"], false,
+            "depth 99 must clamp to 16, leaving a 20-hop chain out of reach; without the \
+             clamp this route is found and the R4 budget has no enforcement mechanism"
+        );
+        assert_eq!(res.content["depth_bounded"], true);
+
+        // And the ceiling itself is reachable: 16 hops at the clamped depth.
+        let at_ceiling = path_chain_store(16, 0);
+        let ok = Path
+            .invoke(
+                &at_ceiling,
+                &json!({"from": "name_f0_", "to": "name_f16_", "depth": 99}),
+            )
+            .unwrap();
+        assert_eq!(ok.content["found"], true);
+        assert_eq!(ok.content["hops"].as_array().unwrap().len(), 16);
+    }
+
+    /// The node-budget clamp, likewise observable: an over-ceiling request must behave as
+    /// the ceiling, not as the number asked for.
+    #[test]
+    fn path_node_budget_clamp_is_falsifiable() {
+        // A hub with 6 000 leaves: at max_nodes 5 000 the walk is capped; unclamped at
+        // 99 999 it would not be.
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        let mut nodes = vec![make_node("hub", "hub", NodeKind::Function, "src/h.rs", 0)];
+        let mut edges = Vec::new();
+        for i in 0..6_000 {
+            let id = format!("leaf{i}");
+            nodes.push(make_node(&id, &id, NodeKind::Function, "src/l.rs", 1));
+            edges.push(make_call_edge("hub", &id));
+        }
+        nodes.push(make_node(
+            "island",
+            "island",
+            NodeKind::Function,
+            "src/i.rs",
+            2,
+        ));
+        store.upsert_nodes(&nodes).unwrap();
+        store.upsert_edges(&edges).unwrap();
+        store.commit_batch().unwrap();
+
+        let res = Path
+            .invoke(
+                &store,
+                &json!({"from": "hub", "to": "island", "max_nodes": 99_999}),
+            )
+            .unwrap();
+        assert_eq!(res.content["found"], false);
+        assert_eq!(
+            res.content["node_bounded"], true,
+            "max_nodes 99 999 must clamp to 5 000, so the 6 000-leaf walk is capped; \
+             unclamped it would complete and report an unbounded absence"
+        );
+    }
+
+    /// The R3 defect the post-gates review caught: `depth: 0` expands nothing, so no node
+    /// reaches the frontier and `depth_bounded` stays false — without a floor the response
+    /// claims the whole reachable set was searched for a search that visited nothing.
+    #[test]
+    fn path_depth_zero_never_claims_a_proven_absence() {
+        let store = fixture_store();
+        for depth in [json!(0), json!(-3), json!("nonsense")] {
+            let res = Path
+                .invoke(
+                    &store,
+                    &json!({"from": "caller_fn", "to": "leaf_fn", "depth": depth}),
+                )
+                .unwrap();
+            assert!(
+                !res.diagnostics
+                    .iter()
+                    .any(|d| d.contains("no route exists")),
+                "depth {depth} must not produce a proven-absence claim: {:?}",
+                res.diagnostics
+            );
+        }
+        // depth 0 floors to 1, which is enough for the one-hop leg.
+        let one = Path
+            .invoke(
+                &store,
+                &json!({"from": "caller_fn", "to": "middle_fn", "depth": 0}),
+            )
+            .unwrap();
+        assert_eq!(one.content["found"], true, "floored to depth 1");
+    }
+
+    /// The `to` side of the unresolved branch. Both surfaces pick which operand to name
+    /// with a ternary; collapsing it tells an agent the symbol it DID resolve is missing.
+    #[test]
+    fn path_unresolvable_to_names_the_to_operand() {
+        let store = fixture_store();
+        let res = Path
+            .invoke(&store, &json!({"from": "caller_fn", "to": "no_such_fn"}))
+            .unwrap();
+        assert_eq!(res.content["unresolved"], "to");
+        let diag = res.diagnostics.join("\n");
+        assert!(
+            diag.contains("'to' operand 'no_such_fn'"),
+            "the diagnostic must name the side AND the offending value, not the resolved \
+             one: {diag}"
+        );
+        assert!(
+            !diag.contains("'caller_fn'"),
+            "must not name the resolved operand: {diag}"
+        );
+    }
+
+    /// `from == to` is a found route of zero hops, not a bug and not an absence.
+    #[test]
+    fn path_same_symbol_is_found_with_zero_hops() {
+        let store = fixture_store();
+        let res = Path
+            .invoke(&store, &json!({"from": "caller_fn", "to": "caller_fn"}))
+            .unwrap();
         assert_eq!(res.content["found"], true);
-        assert_eq!(res.content["hops"].as_array().unwrap().len(), 16);
+        assert_eq!(res.content["hops"].as_array().unwrap().len(), 0);
+        assert_eq!(res.content["unresolved"], serde_json::Value::Null);
+        assert!(
+            !res.diagnostics.iter().any(|d| d.contains("no route")),
+            "a zero-hop identity route is found, not absent: {:?}",
+            res.diagnostics
+        );
+    }
+
+    /// The R7 threshold is `< 0.5`; the boundary value itself must not be flagged, or
+    /// flipping to `<=` would be free.
+    #[test]
+    fn path_r7_boundary_confidence_is_not_flagged() {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[
+                make_node("a", "a_fn", NodeKind::Function, "src/a.rs", 1),
+                make_node("b", "b_fn", NodeKind::Function, "src/b.rs", 2),
+            ])
+            .unwrap();
+        // Heuristic tier is exactly 0.5 — the boundary the threshold was chosen against.
+        store
+            .upsert_edges(&[Edge::new(
+                SymbolId("a".into()),
+                SymbolId("b".into()),
+                EdgeKind::Calls,
+                ResolutionTier::Heuristic,
+                "heuristic",
+            )])
+            .unwrap();
+        store.commit_batch().unwrap();
+
+        let res = Path
+            .invoke(&store, &json!({"from": "a_fn", "to": "b_fn"}))
+            .unwrap();
+        assert_eq!(res.content["found"], true);
+        assert!(
+            !res.diagnostics
+                .iter()
+                .any(|d| d.starts_with("R7-CONFIDENCE")),
+            "0.5 is not below 0.5: {:?}",
+            res.diagnostics
+        );
     }
 
     /// R4: the budget governs what the agent receives — the content block PLUS the

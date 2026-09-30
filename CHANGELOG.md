@@ -51,7 +51,7 @@ Breaking for Rust callers, so the next release is 0.18.0, not 0.17.x. See **Chan
   multi-match name whose other candidate was cut off never reports a proven absence.
 
   Implemented over one bounded `traverse` per resolved start symbol — no new `GraphRead`
-  method, no store change, no per-node query. Estate tools 11 → 12, total 30.
+  method, no store change, no per-node query.
 
 ### Fixed
 - **The BlastRadius depth flag describes the rows it returns (#222 review).** The horizon is

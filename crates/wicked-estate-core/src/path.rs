@@ -185,15 +185,16 @@ pub fn path_between(
 
     // Endpoint nodes come from the traversal that found the route, so neither surface needs
     // a store lookup to denormalize a hop.
-    let mut wanted: Vec<&SymbolId> = Vec::with_capacity(hops.len() * 2);
-    for hop in &hops {
-        wanted.push(&hop.source);
-        wanted.push(&hop.target);
-    }
+    // A set, not a Vec: this is scanned once per subgraph node, and a subgraph may hold
+    // `max_nodes` of them while the route has at most 17 endpoints.
+    let wanted: std::collections::HashSet<&SymbolId> = hops
+        .iter()
+        .flat_map(|hop| [&hop.source, &hop.target])
+        .collect();
     let endpoints: Vec<Node> = subgraph
         .nodes
         .iter()
-        .filter(|n| wanted.contains(&&n.symbol))
+        .filter(|n| wanted.contains(&n.symbol))
         .cloned()
         .collect();
 

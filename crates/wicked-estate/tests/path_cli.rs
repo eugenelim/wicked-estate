@@ -10,16 +10,33 @@
 //! on `path A --json`. Each case below fails against that implementation.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_wicked-estate")
 }
 
+/// Owns a scratch directory and removes it on drop, so a CI run does not leave a dozen
+/// indexed repositories and databases behind in the temp dir.
+struct Scratch(PathBuf);
+
+impl std::ops::Deref for Scratch {
+    type Target = PathBuf;
+    fn deref(&self) -> &PathBuf {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A Rust source tree with a call chain `f0 → f1 → … → fN`, indexed into a scratch db.
-/// Returns the directory; the db lives at `<dir>/graph.db`.
-fn indexed_chain(tag: &str, depth: usize) -> PathBuf {
+/// The db lives at `<dir>/graph.db`; the directory is removed when the handle drops.
+fn indexed_chain(tag: &str, depth: usize) -> Scratch {
     let d = std::env::temp_dir().join(format!("ci_pathcli_{tag}_{}", std::process::id()));
     let _ = fs::remove_dir_all(&d);
     fs::create_dir_all(d.join("src")).unwrap();
@@ -45,10 +62,10 @@ fn indexed_chain(tag: &str, depth: usize) -> PathBuf {
         "index failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    d
+    Scratch(d)
 }
 
-fn path_in(dir: &PathBuf, args: &[&str]) -> Output {
+fn path_in(dir: &Path, args: &[&str]) -> Output {
     Command::new(bin())
         .current_dir(dir)
         .arg("path")
@@ -231,14 +248,8 @@ fn an_unknown_double_dash_token_is_rejected_not_taken_as_an_operand() {
 }
 
 #[test]
-fn max_depth_range_is_enforced_and_clamped() {
+fn max_depth_rejects_out_of_range_values() {
     let d = indexed_chain("range", 3);
-
-    // Above the ceiling clamps rather than erroring.
-    let clamped = path_in(&d, &["f0", "f3", "--max-depth", "17"]);
-    assert!(clamped.status.success(), "17 must clamp to 16, not error");
-    assert!(stdout_of(&clamped).contains("3 hop(s)"));
-
     for bad in ["0", "abc"] {
         let out = path_in(&d, &["f0", "f3", "--max-depth", bad]);
         assert!(
@@ -250,6 +261,45 @@ fn max_depth_range_is_enforced_and_clamped() {
             "the error must name the accepted range"
         );
     }
+}
+
+/// The clamp must be OBSERVABLE. A short chain found at `--max-depth 17` proves nothing —
+/// it is found whether 17 clamps to 16 or passes through raw. A 20-hop chain must NOT be
+/// found, which holds only if the clamp applies; and a 16-hop chain must still be found,
+/// so the ceiling is reachable rather than merely low.
+#[test]
+fn max_depth_above_the_ceiling_clamps_observably() {
+    let deep = indexed_chain("clamp20", 20);
+    let out = path_in(&deep, &["f0", "f20", "--max-depth", "17"]);
+    assert!(out.status.success(), "17 must clamp, not error");
+    assert!(
+        stdout_of(&out).contains("no path found"),
+        "clamped to 16, a 20-hop chain is out of reach:\n{}",
+        stdout_of(&out)
+    );
+
+    let at_ceiling = indexed_chain("clamp16", 16);
+    let ok = path_in(&at_ceiling, &["f0", "f16", "--max-depth", "17"]);
+    assert!(
+        stdout_of(&ok).contains("16 hop(s)"),
+        "the ceiling itself must be reachable:\n{}",
+        stdout_of(&ok)
+    );
+}
+
+/// The range criterion's lower bound. The not-found half has no observation at N=1,
+/// because `--max-depth 0` is a usage error rather than a search.
+#[test]
+fn max_depth_one_finds_a_single_hop() {
+    let d = indexed_chain("n1", 2);
+    assert!(
+        stdout_of(&path_in(&d, &["f0", "f1", "--max-depth", "1"])).contains("1 hop(s)"),
+        "N=1 must find a 1-hop route"
+    );
+    assert!(
+        stdout_of(&path_in(&d, &["f0", "f2", "--max-depth", "1"])).contains("no path found"),
+        "and must not reach the 2-hop target"
+    );
 }
 
 #[test]

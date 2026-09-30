@@ -67,3 +67,78 @@ verified by mutating the source and confirming they die:
 The disjunction tests needed a fixture change to earn that: in the first draft the bounded
 candidate happened to sort last, so last-candidate semantics gave the right answer by luck
 and the tests passed against the mutant. The bounded candidate now sorts first.
+
+## Post-gates review round 1 (2026-09-30)
+
+Two reviewers ran against the implementation diff; both reports were adjudicated
+independently. `adversarial-reviewer`: 9 sustained / 1 refuted. `quality-engineer`:
+12 sustained / 3 refuted.
+
+### The one live defect
+
+**MCP `Path` with `depth: 0` claimed a proven absence.** The CLI rejected `--max-depth 0`;
+the MCP surface clamped only the upper bound, so a request with `depth: 0` expanded nothing,
+left `depth_bounded` false (no backend records the start in `depths`), and emitted "the whole
+reachable set was searched, so no route exists" — the R3 failure this feature is built
+around, on the surface agents actually call. Fixed by flooring to 1 and pinning `minimum: 1`
+in the advertised schema and the frozen golden.
+
+### What the coverage audit found, and what it says about the earlier claim
+
+The quality reviewer mutation-tested the parts of the diff I had not, and found four
+load-bearing mechanisms whose removal left the entire suite green:
+
+| Mechanism | Mutation that survived |
+| --- | --- |
+| MCP dispatch arm | deleting `\| "Path"` from `handle_request_unified_ro` |
+| `depth` clamp | removing `.min(16)` |
+| `max_nodes` clamp | removing `.min(5_000)` |
+| BFS adjacency sort | replacing it with `admissible.reverse()` |
+
+Each now has a falsifier, and each mutation was re-run to confirm it dies:
+
+- Dispatch arm → `path_dispatches_through_the_unified_arm_in_both_modes` (also discharges the
+  read-only half of the criterion). The prior test used `handle_request`, which resolves
+  against `all_tools()` and never reads the arm the binary uses.
+- `depth` clamp → `path_depth_clamp_is_falsifiable` (a 20-hop chain must NOT be found at
+  `depth: 99`; the old fixture was 16 hops, found either way).
+- `max_nodes` clamp → `path_node_budget_clamp_is_falsifiable` (a 6 000-leaf hub).
+- Adjacency sort → `hop_sequence_is_independent_of_edge_and_node_order`. The old
+  determinism test called `shortest_path` twice on the *same* `Subgraph`, which any pure
+  function satisfies.
+
+**The lesson for the record.** T2 and T4 claimed mutation verification, and that claim was
+true but narrow: the two tests checked were the two written as falsifiers. Sampling only the
+tests designed to fail said nothing about the rest, and "1484 passing" was reported with more
+confidence than it had earned. Mutation-test the mechanism you are relying on, not the test
+you are proud of.
+
+### Also repaired
+
+- `CHANGELOG.md` stated "Estate tools 11 → 12, total 30" while `README.md` still says 29 —
+  the cross-document contradiction the owner's scope split existed to prevent, and a
+  violation of this spec's own no-count criterion. Count clause removed.
+- Two stale count comments in `wicked-estate-mcp/src/lib.rs`, plus the pre-existing
+  "advertises all 28" line, which was already wrong before this change and is one line.
+- `to`-side unresolved rendering, zero-hop identity route, and the R7 boundary at exactly
+  0.5 (`ResolutionTier::Heuristic`) — all previously unexercised; the `to` branch collapse
+  was mutation-confirmed to survive the old tests.
+- Endpoint completeness now asserted on `SqliteStore` at the depth frontier, the backend the
+  admission rule was written for; the previous assertion ran only on `MemStore`.
+- `EdgeKind` gained a derived `Ord` so the adjacency tie-break stops allocating two `String`s
+  per comparison. The alternative — dropping the tie-break — was explicitly rejected: it is
+  cheaper and silently destroys the determinism the sort exists for.
+- Endpoint selection uses a `HashSet` rather than a linear `Vec::contains`.
+- The CLI spawn fixture now cleans up after itself.
+
+### Refuted, and why it matters
+
+- **Unbounded candidate fan-out** (one traversal per `from` candidate, no cap). Refuted: the
+  plan's Risks section records it as an accepted residual risk, and a cap would silently
+  convert a proven absence into an unreported bounded one — the R3 failure the design is
+  built around. Reopening needs the plan's own trigger: an integrator reporting a slow
+  `path` on a large graph.
+- The CLI span's attributes, and the two hand-delegating `GraphRead` test doubles: no
+  criterion, rule or defect named.
+- The spec's unchecked criteria and `Status: Approved`: finish-checklist work not yet due at
+  review time, not a defect in the reviewed target.

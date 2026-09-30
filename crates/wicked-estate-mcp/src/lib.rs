@@ -160,14 +160,16 @@ fn path_schema() -> Value {
             },
             "depth": {
                 "type": "integer",
-                "description": "Maximum hop depth (default 8, max 16).",
+                "description": "Maximum hop depth (default 8, min 1, max 16). A depth below 1 would expand nothing while reporting an unbounded search, so it is floored.",
                 "default": 8,
+                "minimum": 1,
                 "maximum": 16
             },
             "max_nodes": {
                 "type": "integer",
-                "description": "Maximum nodes visited while searching (default 1000, max 5000).",
+                "description": "Maximum nodes visited while searching (default 1000, min 1, max 5000).",
                 "default": 1000,
+                "minimum": 1,
                 "maximum": 5000
             }
         },
@@ -1140,14 +1142,14 @@ mod tests {
         );
     }
 
-    /// DoD-A4: when SemanticSearch IS wired and the dim-guard passes, the count rises to **12** —
+    /// DoD-A4: when SemanticSearch IS wired and the dim-guard passes, the count rises to **13** —
     /// the 12 unconditional + the conditional semantic tool. Falsifier for the floor being a hard
     /// ceiling.
     #[test]
     fn tools_list_returns_thirteen_with_semantic_available() {
         let store = fixture();
         let fake = FakeSemantic;
-        // Matching id + dim → dim-guard passes → SemanticSearch advertised as the 11th tool.
+        // Matching id + dim → dim-guard passes → SemanticSearch advertised as the 13th tool.
         let ctx = McpContext {
             embedder_runtime_id: Some("hash:v1".into()),
             embedder_runtime_dim: Some(64),
@@ -2805,6 +2807,60 @@ mod tests {
         }
     }
 
+    /// `Path` must dispatch through the arm the BINARY uses, in both modes.
+    ///
+    /// `main.rs` routes every `tools/call` through [`handle_request_unified_ro`], whose tool
+    /// gate is a named match arm. The other Path call test goes through `handle_request`,
+    /// which resolves against `all_tools()` and never reads that arm — so deleting `Path`
+    /// from it left the whole crate green while every real call returned `unknown tool`, an
+    /// R1 `isError` that abandons the agent's session. This test is the falsifier for that
+    /// arm, and it also discharges the read-only half of the criterion: `Path` is a read
+    /// tool, so `--readonly` must let it through rather than refuse it.
+    #[test]
+    fn path_dispatches_through_the_unified_arm_in_both_modes() {
+        let store = fixture();
+        for read_only in [false, true] {
+            let mut fake_mem = FakeMemory;
+            let mut fake_know = FakeKnowledge;
+            let mut domains = DomainHandles {
+                memory: &mut fake_mem
+                    as &mut dyn wicked_estate_memory_core::MemoryApi<Error = anyhow::Error>,
+                knowledge: &mut fake_know as &mut dyn wicked_estate_knowledge::KnowledgeApi,
+            };
+            let req = json!({
+                "jsonrpc": "2.0",
+                "id": 901,
+                "method": "tools/call",
+                "params": {
+                    "name": "Path",
+                    "arguments": { "from": "caller_fn", "to": "leaf_fn" }
+                }
+            });
+            let resp = handle_request_unified_ro(
+                &store,
+                &req,
+                &McpContext::default(),
+                Some(&mut domains),
+                None,
+                read_only,
+            );
+            assert!(
+                resp.get("error").is_none(),
+                "Path must dispatch with read_only={read_only}; got {resp}"
+            );
+            let content = resp["result"]["content"]
+                .as_array()
+                .unwrap_or_else(|| panic!("read_only={read_only}: no content in {resp}"));
+            let doc: Value = serde_json::from_str(content[0]["text"].as_str().unwrap())
+                .expect("first content block is the JSON document");
+            assert_eq!(
+                doc["found"], true,
+                "read_only={read_only}: caller_fn reaches leaf_fn"
+            );
+            assert_eq!(doc["hops"].as_array().unwrap().len(), 2);
+        }
+    }
+
     /// Falsifier for the floor: WITHOUT `--readonly` (`read_only = false`, the default the
     /// public [`handle_request_unified`] wrapper uses) the write tools are STILL advertised and a
     /// write call reaches the engine — proving read-only is the only thing that hides/refuses them
@@ -2813,7 +2869,7 @@ mod tests {
     fn without_readonly_write_tools_are_advertised_and_dispatch() {
         let store = fixture();
 
-        // Default (non-readonly) tools/list advertises all 28, writes included.
+        // Default (non-readonly) tools/list advertises all 30, writes included.
         let names = {
             let mut fake_mem = FakeMemory;
             let mut fake_know = FakeKnowledge;

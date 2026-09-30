@@ -6,8 +6,9 @@
     "properties": {
       "depth": {
         "default": 8,
-        "description": "Maximum hop depth (default 8, max 16).",
+        "description": "Maximum hop depth (default 8, min 1, max 16). A depth below 1 would expand nothing while reporting an unbounded search, so it is floored.",
         "maximum": 16,
+        "minimum": 1,
         "type": "integer"
       },
       "from": {
@@ -16,8 +17,9 @@
       },
       "max_nodes": {
         "default": 1000,
-        "description": "Maximum nodes visited while searching (default 1000, max 5000).",
+        "description": "Maximum nodes visited while searching (default 1000, min 1, max 5000).",
         "maximum": 5000,
+        "minimum": 1,
         "type": "integer"
       },
       "to": {

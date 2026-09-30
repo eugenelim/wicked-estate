@@ -170,12 +170,17 @@ impl Subgraph {
             .iter()
             .filter(|e| node_set.contains(&e.source) && node_set.contains(&e.target))
             .collect();
+        // The kind tie-break uses `EdgeKind`'s derived `Ord` rather than formatting both
+        // kinds per comparison, which heap-allocated twice for every comparison in a sort
+        // over every admissible edge. Dropping the tie-break instead would be cheaper still
+        // and would quietly lose the determinism this sort exists for: parallel edges
+        // sharing both endpoints would then order by however the backend returned them.
         admissible.sort_by(|a, b| {
             a.source
                 .0
                 .cmp(&b.source.0)
                 .then_with(|| a.target.0.cmp(&b.target.0))
-                .then_with(|| format!("{:?}", a.kind).cmp(&format!("{:?}", b.kind)))
+                .then_with(|| a.kind.cmp(&b.kind))
         });
         let mut adjacency: std::collections::BTreeMap<&SymbolId, Vec<&Edge>> =
             std::collections::BTreeMap::new();
@@ -747,6 +752,42 @@ mod shortest_path_tests {
             g.shortest_path(&sym("A"), &[sym("D")]).map(|h| h.len()),
             Some(3),
             "filtering the frontier-exterior edge must not disturb the real route"
+        );
+    }
+
+    /// The adjacency sort's reason to exist: the route must not depend on the order the
+    /// backend happened to return `edges` in. Two subgraphs identical except for edge and
+    /// node order must give the identical hop sequence.
+    ///
+    /// The diamond-determinism test above cannot catch this — it calls `shortest_path`
+    /// twice on the *same* `Subgraph` value, which any pure function satisfies. Deleting or
+    /// reversing the sort leaves that test green and this one red.
+    #[test]
+    fn hop_sequence_is_independent_of_edge_and_node_order() {
+        // A diamond with two equally short routes: the tie is decided by visitation order,
+        // so it is exactly where an unsorted adjacency shows through.
+        let pairs = [("A", "B"), ("A", "C"), ("B", "D"), ("C", "D")];
+        let ids = ["A", "B", "C", "D"];
+
+        let forward = subgraph(&ids, &pairs);
+        let mut reversed_pairs = pairs;
+        reversed_pairs.reverse();
+        let mut reversed_ids = ids;
+        reversed_ids.reverse();
+        let reversed = subgraph(&reversed_ids, &reversed_pairs);
+
+        let a = forward
+            .shortest_path(&sym("A"), &[sym("D")])
+            .expect("route exists");
+        let b = reversed
+            .shortest_path(&sym("A"), &[sym("D")])
+            .expect("route exists");
+        assert_eq!(
+            hop_ids(&a),
+            hop_ids(&b),
+            "the same graph in a different edge/node order must yield the same route; \
+             without the adjacency sort the tie flips with input order, and the two \
+             backends return edges in different orders"
         );
     }
 
