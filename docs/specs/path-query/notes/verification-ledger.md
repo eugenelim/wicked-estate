@@ -38,3 +38,32 @@ A passing unit gate would not have caught this; only running the binary did.
 `index` emits `EMIT-DEADLETTER: … spawn 'wicked-bus' failed` on a machine with no
 `wicked-bus` binary, and spools to the dead-letter file. Pre-existing behaviour of the
 event bus, unrelated to `path`.
+
+
+## T4 — measured R4 worst case (2026-09-30)
+
+The acceptance criterion pins a 16-hop route whose symbol ids, names and file paths are each
+200 characters, measured over the content block plus the diagnostics block the MCP layer
+appends. Measured: **content 23 423 + diagnostics 102 = 23 525** of the 25 000-character
+budget — 5.9% headroom.
+
+This is the number that settled a round-3 finding which called the budget a blocker and
+proposed adding `cap_rows_to_budget` truncation to `Path`. The adjudicator refuted it
+(TraverseGraph, the closest peer, also satisfies R4 by traversal bounds alone) and estimated
+~23.5K; the measurement confirms it. The `max_depth <= 16` clamp is the enforcement
+mechanism, and there is no truncation step to maintain.
+
+## T4 — mutation checks (2026-09-30)
+
+Two tests in this change exist to fail against a plausible wrong implementation. Both were
+verified by mutating the source and confirming they die:
+
+- Removing the `edge_json` cache seeding from `PathResult::endpoints` fails
+  `path_renders_a_16_hop_route_with_zero_get_node_calls` and nothing else.
+- Swapping the bound-flag disjunction (`|=` to `=`, i.e. last-candidate semantics) fails
+  exactly `depth_bounded_is_a_disjunction_across_candidates` and
+  `node_bounded_is_a_disjunction_across_candidates` in the store crate.
+
+The disjunction tests needed a fixture change to earn that: in the first draft the bounded
+candidate happened to sort last, so last-candidate semantics gave the right answer by luck
+and the tests passed against the mutant. The bounded candidate now sorts first.

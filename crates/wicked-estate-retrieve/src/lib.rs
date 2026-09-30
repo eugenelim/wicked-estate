@@ -863,6 +863,144 @@ impl RetrievalTool for TraverseGraph {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Path
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The ordered hops from one symbol to another — the route, not the reachable set.
+///
+/// A peer of [`TraverseGraph`], not a mode of it: that tool's request and response shapes are
+/// a published contract, and threading a `to` field through it would change the envelope every
+/// existing consumer parses.
+///
+/// **Request shape**
+/// ```json
+/// { "from": "<name-or-id>", "to": "<name-or-id>", "depth": 8, "max_nodes": 1000 }
+/// ```
+/// * `from` / `to` — required; an exact symbol name, or a `SymbolId` (the form
+///   `SearchEntity` and `TraverseGraph` hand back).
+/// * `depth`     — optional, default 8, max 16.
+/// * `max_nodes` — optional, default 1 000, max 5 000.
+///
+/// **Response `content` shape**
+/// ```json
+/// { "hops": [ { "source": { "symbol": "…", "name": "…", "kind": "…",
+///                           "file": "…", "line": 11, "line_1based": 12 },
+///               "target": { … }, "kind": "calls",
+///               "confidence": 1.0, "provenance": "parsed",
+///               "resolved_by": "scip-rust" }, … ],
+///   "found": true, "depth_bounded": false, "node_bounded": false,
+///   "unresolved": null }
+/// ```
+/// `found: false` with both bound flags clear is a **proven** absence. With either flag set it
+/// is a **bounded** one and the diagnostics say so — conflating the two is the R3 failure the
+/// agent-behavior rules forbid.
+#[derive(Debug, Default)]
+pub struct Path;
+
+impl RetrievalTool for Path {
+    fn name(&self) -> &str {
+        "Path"
+    }
+
+    fn description(&self) -> &str {
+        "The ordered hops from one symbol to another — how A reaches B, not merely that it \
+         does. Each hop carries its edge kind, confidence, provenance and resolving tier, and \
+         both endpoints are denormalized (name, file, line), so an agent can name the \
+         intermediate functions and open only those files. Use this instead of reconstructing \
+         a route from TraverseGraph's edge list. `from` and `to` accept a symbol name or a \
+         SymbolId."
+    }
+
+    fn invoke(&self, store: &dyn GraphRead, request: &Value) -> Result<RetrievalResult> {
+        let empty = |diag: Vec<String>| RetrievalResult {
+            content: json!({
+                "hops": [], "found": false,
+                "depth_bounded": false, "node_bounded": false, "unresolved": null
+            }),
+            diagnostics: diag,
+        };
+
+        let from = request.get("from").and_then(|v| v.as_str()).unwrap_or("");
+        let to = request.get("to").and_then(|v| v.as_str()).unwrap_or("");
+        if from.is_empty() || to.is_empty() {
+            let missing = if from.is_empty() { "from" } else { "to" };
+            return Ok(empty(vec![
+                staleness_note(),
+                format!("Path: '{missing}' field is required"),
+            ]));
+        }
+
+        let max_depth = opt_u64(request, "depth").unwrap_or(8).min(16) as u32;
+        let max_nodes = opt_u64(request, "max_nodes").unwrap_or(1_000).min(5_000) as usize;
+
+        let result = wicked_estate_core::path_between(store, from, to, max_depth, max_nodes)?;
+        let mut diag = vec![staleness_note()];
+
+        if let Some(side) = result.unresolved {
+            diag.push(format!(
+                "Path: '{}' matched no symbol name and no live node id — this is an \
+                 unresolved input, not a proven absence",
+                if side == wicked_estate_core::Unresolved::From {
+                    from
+                } else {
+                    to
+                }
+            ));
+        } else if !result.found {
+            if result.depth_bounded || result.node_bounded {
+                // R3: the search was cut off, so absence here is not proof of absence.
+                diag.push(format!(
+                    "Path: no route found WITHIN THE BOUND (depth_bounded={}, \
+                     node_bounded={}, max_depth={max_depth}, max_nodes={max_nodes}) — the \
+                     search was cut off and a route may exist beyond it",
+                    result.depth_bounded, result.node_bounded
+                ));
+            } else {
+                diag.push(format!(
+                    "Path: no route from '{from}' to '{to}'; the whole reachable set was \
+                     searched, so no route exists"
+                ));
+            }
+        }
+
+        // R7 — never let a heuristic route read as a fact.
+        let low_conf = result
+            .hops
+            .iter()
+            .filter(|e| e.confidence.get() < 0.5)
+            .count();
+        if low_conf > 0 {
+            diag.push(format!(
+                "R7-CONFIDENCE: {low_conf} hop(s) below 0.5 confidence on this route"
+            ));
+        }
+
+        // Seed the denormalization cache from the traversal's own nodes, exactly as
+        // `TraverseGraph` seeds from `subgraph.nodes`. Unseeded, `endpoint_json` falls through
+        // to `store.get_node` once per endpoint — up to 17 queries on a 16-hop path.
+        let mut node_cache: HashMap<SymbolId, Option<wicked_estate_core::Node>> = HashMap::new();
+        for n in &result.endpoints {
+            node_cache.insert(n.symbol.clone(), Some(n.clone()));
+        }
+        let mut hops_json: Vec<Value> = Vec::with_capacity(result.hops.len());
+        for e in &result.hops {
+            hops_json.push(edge_json(store, e, &mut node_cache)?);
+        }
+
+        Ok(RetrievalResult {
+            content: json!({
+                "hops": hops_json,
+                "found": result.found,
+                "depth_bounded": result.depth_bounded,
+                "node_bounded": result.node_bounded,
+                "unresolved": result.unresolved.map(|u| u.as_str()),
+            }),
+            diagnostics: diag,
+        })
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // BlastRadius
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -3165,6 +3303,375 @@ mod tests {
 
         assert!(!res.content["found"].as_bool().unwrap());
         assert!(!res.diagnostics.is_empty());
+    }
+
+    // ── Path ─────────────────────────────────────────────────────────────────
+
+    /// A chain of `len` hops whose node names are `f0…flen`, each identifier padded to
+    /// `pad` characters so the R4 budget can be measured at a realistic worst case.
+    fn path_chain_store(len: usize, pad: usize) -> MemStore {
+        let wide = |s: &str| -> String {
+            let mut out = s.to_string();
+            while out.len() < pad {
+                out.push('x');
+            }
+            out
+        };
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        let nodes: Vec<Node> = (0..=len)
+            .map(|i| {
+                make_node(
+                    &wide(&format!("id_f{i}_")),
+                    &wide(&format!("name_f{i}_")),
+                    NodeKind::Function,
+                    &wide(&format!("src/f{i}_")),
+                    i as u32,
+                )
+            })
+            .collect();
+        let edges: Vec<Edge> = (0..len)
+            .map(|i| {
+                make_call_edge(
+                    &wide(&format!("id_f{i}_")),
+                    &wide(&format!("id_f{}_", i + 1)),
+                )
+            })
+            .collect();
+        store.upsert_nodes(&nodes).unwrap();
+        store.upsert_edges(&edges).unwrap();
+        store.commit_batch().unwrap();
+        store
+    }
+
+    #[test]
+    fn path_returns_hops_in_order_with_denormalized_endpoints() {
+        let store = fixture_store();
+        let res = Path
+            .invoke(&store, &json!({"from": "caller_fn", "to": "leaf_fn"}))
+            .unwrap();
+
+        assert_eq!(res.content["found"], true);
+        let hops = res.content["hops"].as_array().unwrap();
+        assert_eq!(hops.len(), 2, "caller → middle → leaf");
+        assert_eq!(hops[0]["source"]["name"], "caller_fn");
+        assert_eq!(hops[0]["target"]["name"], "middle_fn");
+        assert_eq!(hops[1]["target"]["name"], "leaf_fn");
+        for hop in hops {
+            for end in ["source", "target"] {
+                for field in ["symbol", "name", "kind", "file", "line", "line_1based"] {
+                    assert!(
+                        !hop[end][field].is_null(),
+                        "{end}.{field} must be denormalized — no N+1 RetrieveEntity"
+                    );
+                }
+            }
+            assert!(hop["confidence"].is_number());
+            assert!(!hop["provenance"].is_null());
+            assert!(!hop["resolved_by"].is_null());
+        }
+    }
+
+    #[test]
+    fn path_missing_required_field_names_it() {
+        let store = fixture_store();
+        for (req, missing) in [
+            (json!({"to": "leaf_fn"}), "from"),
+            (json!({"from": "caller_fn"}), "to"),
+        ] {
+            let res = Path.invoke(&store, &req).unwrap();
+            assert_eq!(res.content["found"], false);
+            assert!(
+                res.diagnostics
+                    .iter()
+                    .any(|d| d.contains(&format!("'{missing}' field is required"))),
+                "must name the missing field, got {:?}",
+                res.diagnostics
+            );
+        }
+    }
+
+    /// Distinct from the missing-field case above: the field is present, its value just
+    /// names nothing. Reporting these identically is the R3 failure.
+    #[test]
+    fn path_unresolvable_value_is_not_a_proven_absence() {
+        let store = fixture_store();
+        let res = Path
+            .invoke(&store, &json!({"from": "no_such_fn", "to": "leaf_fn"}))
+            .unwrap();
+        assert_eq!(res.content["found"], false);
+        assert_eq!(res.content["unresolved"], "from");
+        assert!(
+            res.diagnostics
+                .iter()
+                .any(|d| d.contains("unresolved input, not a proven absence")),
+            "got {:?}",
+            res.diagnostics
+        );
+    }
+
+    #[test]
+    fn path_flags_low_confidence_hops() {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[
+                make_node("a", "a_fn", NodeKind::Function, "src/a.rs", 1),
+                make_node("b", "b_fn", NodeKind::Function, "src/b.rs", 2),
+            ])
+            .unwrap();
+        // Tags tier = 0.3 confidence, below the 0.5 R7 threshold.
+        store
+            .upsert_edges(&[Edge::new(
+                SymbolId("a".into()),
+                SymbolId("b".into()),
+                EdgeKind::Calls,
+                ResolutionTier::Tags,
+                "tags",
+            )])
+            .unwrap();
+        store.commit_batch().unwrap();
+
+        let res = Path
+            .invoke(&store, &json!({"from": "a_fn", "to": "b_fn"}))
+            .unwrap();
+        assert_eq!(res.content["found"], true);
+        assert!(
+            res.diagnostics
+                .iter()
+                .any(|d| d.starts_with("R7-CONFIDENCE: 1 hop(s)")),
+            "a heuristic route must not read as a fact: {:?}",
+            res.diagnostics
+        );
+    }
+
+    #[test]
+    fn path_bounded_absence_says_so_and_proven_absence_does_not() {
+        let store = path_chain_store(6, 0);
+        let bounded = Path
+            .invoke(
+                &store,
+                &json!({"from": "name_f0_", "to": "name_f6_", "depth": 2}),
+            )
+            .unwrap();
+        assert_eq!(bounded.content["found"], false);
+        assert_eq!(bounded.content["depth_bounded"], true);
+        assert!(
+            bounded
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("WITHIN THE BOUND")),
+            "{:?}",
+            bounded.diagnostics
+        );
+
+        // Reverse direction over the same chain: genuinely nothing to find, nothing cut off.
+        let proven = Path
+            .invoke(
+                &store,
+                &json!({"from": "name_f6_", "to": "name_f0_", "depth": 16}),
+            )
+            .unwrap();
+        assert_eq!(proven.content["found"], false);
+        assert_eq!(proven.content["depth_bounded"], false);
+        assert!(
+            proven
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("no route exists")),
+            "{:?}",
+            proven.diagnostics
+        );
+        assert!(
+            !proven
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("WITHIN THE BOUND")),
+            "a proven absence must not carry the bounded-absence line"
+        );
+    }
+
+    #[test]
+    fn path_every_response_carries_the_staleness_note() {
+        let store = fixture_store();
+        for req in [
+            json!({"from": "caller_fn", "to": "leaf_fn"}), // found
+            json!({"from": "leaf_fn", "to": "caller_fn"}), // not found
+            json!({"from": "nope", "to": "leaf_fn"}),      // unresolved
+            json!({"to": "leaf_fn"}),                      // missing field
+        ] {
+            let res = Path.invoke(&store, &req).unwrap();
+            assert!(
+                res.diagnostics.iter().any(|d| d.starts_with("STALENESS")),
+                "R5: every response reports staleness — {req}"
+            );
+        }
+    }
+
+    #[test]
+    fn path_clamps_depth_and_node_budget() {
+        let store = path_chain_store(16, 0);
+        // depth 99 clamps to 16, so a 16-hop chain is still found.
+        let res = Path
+            .invoke(
+                &store,
+                &json!({"from": "name_f0_", "to": "name_f16_", "depth": 99, "max_nodes": 99_999}),
+            )
+            .unwrap();
+        assert_eq!(res.content["found"], true);
+        assert_eq!(res.content["hops"].as_array().unwrap().len(), 16);
+    }
+
+    /// R4: the budget governs what the agent receives — the content block PLUS the
+    /// diagnostics block the MCP layer appends alongside it, not content alone.
+    #[test]
+    fn path_worst_case_response_stays_under_the_r4_budget() {
+        let store = path_chain_store(16, 200);
+        let res = Path
+            .invoke(
+                &store,
+                &json!({
+                    "from": "name_f0_".to_string() + &"x".repeat(192),
+                    "to": "name_f16_".to_string() + &"x".repeat(191),
+                    "depth": 16
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            res.content["found"], true,
+            "the fixture must actually route"
+        );
+        assert_eq!(res.content["hops"].as_array().unwrap().len(), 16);
+
+        let content_len = serde_json::to_string(&res.content).unwrap().len();
+        let diag_len = res.diagnostics.join("\n").len();
+        let total = content_len + diag_len;
+        // Measured 2026-09-30: content 23 423 + diagnostics 102 = 23 525, ~5.9% headroom.
+        // The `max_depth <= 16` clamp is what keeps this bounded; there is no truncation
+        // step, so if this ever exceeds the budget the clamp is the thing to revisit.
+        assert!(
+            total < 25_000,
+            "R4 budget is measured over content + diagnostics: {content_len} + {diag_len} \
+             = {total}, which must stay under 25000"
+        );
+    }
+
+    /// Rendering a route must issue **zero** `get_node` calls: the endpoints come from the
+    /// traversal that found the route, seeded into `edge_json`'s cache. Unseeded,
+    /// `endpoint_json` falls through to the store once per endpoint — up to 17 queries on a
+    /// 16-hop path, which the no-per-node-query rule forbids.
+    ///
+    /// This assertion belongs here and not at the `path_between` seam: that layer never
+    /// denormalizes, so its own call counter cannot observe an unseeded cache.
+    struct GetNodeCounter<'a> {
+        inner: &'a MemStore,
+        get_node_calls: std::cell::Cell<usize>,
+    }
+
+    impl GraphRead for GetNodeCounter<'_> {
+        fn capabilities(&self) -> wicked_estate_core::StoreCapabilities {
+            self.inner.capabilities()
+        }
+        fn get_node(&self, id: &SymbolId) -> Result<Option<Node>> {
+            self.get_node_calls.set(self.get_node_calls.get() + 1);
+            self.inner.get_node(id)
+        }
+        fn find_symbols(&self, q: &SymbolQuery) -> Result<Vec<Node>> {
+            self.inner.find_symbols(q)
+        }
+        fn neighbors(&self, id: &SymbolId, d: Direction) -> Result<Vec<Edge>> {
+            self.inner.neighbors(id, d)
+        }
+        fn traverse(
+            &self,
+            s: &SymbolId,
+            spec: &wicked_estate_core::TraversalSpec,
+        ) -> Result<wicked_estate_core::Subgraph> {
+            self.inner.traverse(s, spec)
+        }
+        fn all_nodes(&self) -> Result<Vec<Node>> {
+            self.inner.all_nodes()
+        }
+        fn all_edges(&self) -> Result<Vec<Edge>> {
+            self.inner.all_edges()
+        }
+        fn unresolved_refs_for_name(
+            &self,
+            n: &str,
+        ) -> Result<Vec<wicked_estate_core::UnresolvedRef>> {
+            self.inner.unresolved_refs_for_name(n)
+        }
+        fn file_digest(&self, f: &str) -> Result<Option<String>> {
+            self.inner.file_digest(f)
+        }
+        fn indexed_files(&self) -> Result<Vec<String>> {
+            GraphRead::indexed_files(self.inner)
+        }
+        fn file_git_sha(&self, f: &str) -> Result<Option<String>> {
+            self.inner.file_git_sha(f)
+        }
+        fn repo_info(&self) -> Result<Option<wicked_estate_core::RepoInfo>> {
+            self.inner.repo_info()
+        }
+        fn edge_history(&self, f: &str) -> Result<Vec<wicked_estate_core::HistoricalEdge>> {
+            self.inner.edge_history(f)
+        }
+        fn file_content(&self, f: &str) -> Result<Option<String>> {
+            self.inner.file_content(f)
+        }
+        fn symbol_source(&self, n: &Node) -> Result<Option<String>> {
+            self.inner.symbol_source(n)
+        }
+        fn changes_since(&self, c: u64) -> Result<Vec<wicked_estate_core::Change>> {
+            self.inner.changes_since(c)
+        }
+        fn node_semantics(
+            &self,
+            s: &SymbolId,
+        ) -> Result<Option<wicked_estate_core::NodeSemantics>> {
+            self.inner.node_semantics(s)
+        }
+        fn find_by_requirement(&self, r: &str) -> Result<Vec<Node>> {
+            self.inner.find_by_requirement(r)
+        }
+        fn annotations(&self, s: &SymbolId) -> Result<Vec<Annotation>> {
+            self.inner.annotations(s)
+        }
+        fn annotations_by_type(&self, t: &str) -> Result<Vec<(SymbolId, Annotation)>> {
+            self.inner.annotations_by_type(t)
+        }
+        fn annotations_stale_since(&self, c: i64) -> Result<Vec<(SymbolId, Annotation)>> {
+            self.inner.annotations_stale_since(c)
+        }
+        fn symbol_epoch(&self, id: &SymbolId) -> Result<Option<u64>> {
+            self.inner.symbol_epoch(id)
+        }
+        fn stats(&self) -> Result<wicked_estate_core::GraphStats> {
+            self.inner.stats()
+        }
+    }
+
+    #[test]
+    fn path_renders_a_16_hop_route_with_zero_get_node_calls() {
+        let inner = path_chain_store(16, 0);
+        let counting = GetNodeCounter {
+            inner: &inner,
+            get_node_calls: std::cell::Cell::new(0),
+        };
+        let res = Path
+            .invoke(
+                &counting,
+                &json!({"from": "name_f0_", "to": "name_f16_", "depth": 16}),
+            )
+            .unwrap();
+        assert_eq!(res.content["found"], true);
+        assert_eq!(res.content["hops"].as_array().unwrap().len(), 16);
+        assert_eq!(
+            counting.get_node_calls.get(),
+            0,
+            "endpoints come from the traversal; an unseeded cache would cost one query per \
+             endpoint"
+        );
     }
 
     // ── TraverseGraph ────────────────────────────────────────────────────────
