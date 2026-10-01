@@ -80,8 +80,16 @@ independently. `adversarial-reviewer`: 9 sustained / 1 refuted. `quality-enginee
 the MCP surface clamped only the upper bound, so a request with `depth: 0` expanded nothing,
 left `depth_bounded` false (no backend records the start in `depths`), and emitted "the whole
 reachable set was searched, so no route exists" — the R3 failure this feature is built
-around, on the surface agents actually call. Fixed by flooring to 1 and pinning `minimum: 1`
-in the advertised schema and the frozen golden.
+around, on the surface agents actually call. Fixed by flooring to 1 and advertising
+`minimum: 1` in the schema and the frozen golden.
+
+**Correction (round 3).** An earlier version of this entry said the floor was "pinned" in the
+golden. It is not: the golden comparison extracts only `required` and the property *key*
+names (`conformance_schemas.rs`), so no assertion anywhere reads a `minimum` keyword and
+removing it from `path_schema()` leaves every golden test green. The floor's actual falsifier
+is the in-code `path_depth_zero_never_claims_a_proven_absence`. The schema annotation is
+advertised but unpinned — widening the golden comparison to constraint keywords would reach
+all 30 tools and is out of scope here.
 
 ### What the coverage audit found, and what it says about the earlier claim
 
@@ -224,3 +232,77 @@ reviewer's seven findings were refuted on that pass.
   derive touches neither.
 - **`ids.dedup()` as dead code**: `GraphRead::find_symbols` documents no uniqueness
   guarantee, so removing it at a `&dyn` seam is unsafe for an out-of-tree store.
+
+
+## Post-gates review round 3 (2026-09-30)
+
+`adversarial-reviewer`: 4 sustained (all advisory) / 1 refuted. `quality-engineer`:
+7 sustained / 0 refuted.
+
+**No code defect.** For the first time both reviewers reported the shipped behaviour as
+correct. Rounds 1 and 2 each found something that would have shipped wrong — a false
+proven-absence on the MCP surface, twice. Round 3 found none, and the R3-class question came
+back without a new instance, which is the first evidence that moving the pre-resolution
+branches behind one constructor closed the class rather than relocating it.
+
+What round 3 found instead was test strength: five mechanisms that worked but had no
+falsifier, and four claims written in prose that the code did not support.
+
+### Falsifiers added, each mutation-confirmed
+
+| Mechanism | Mutant | Test that now dies |
+| --- | --- | --- |
+| `--json` suppressing notices | remove the `if !json_out` guard | `json_mode_suppresses_a_staleness_notice_that_text_mode_shows` |
+| `line_1based = line + 1` | drop the `+ 1` | `json_endpoints_carry_the_six_fields_from_endpoints_not_a_lookup` |
+| MCP `depth` default 8 | `unwrap_or(16)` | `path_depth_default_is_eight` |
+| MCP `max_nodes` default 1 000 | `unwrap_or(5_000)` | `path_node_budget_default_is_one_thousand` |
+| the two reply constructors' shared key set | drop the bound keys from `no_route` | `every_path_reply_carries_the_same_key_set` |
+
+The staleness test is the instructive one. It previously asserted the ABSENCE of a string its
+fixture could never produce: `indexed_chain` built a plain temp directory, so `commits_behind`
+returned `None` and no notice was possible. The fixture is now a git repo with a commit made
+after indexing, and the test asserts text mode DOES show the notice before asserting `--json`
+does not — so the precondition cannot pass vacuously. The adjudicator also ruled out the
+alternative repair: a version-mismatch warning goes to stderr and could never corrupt stdout.
+
+**A mutation of mine that lied.** My first attempt to kill the staleness guard appeared to
+survive. It had not: `blast-radius` carries an identical comment, so `str.index` found that
+arm first and I mutated the wrong command. Anchoring inside the `"path"` arm killed the test
+immediately. A surviving mutant is a claim about the tests; verify the mutation landed where
+you meant before believing it.
+
+### Four false claims
+
+This is the pattern worth recording, because it recurred all session:
+
+1. `path_render_tests`' doc comment said the renderers were asserted directly; it never
+   called `print_path_text` (round 2).
+2. The `no_route` comment said "every no-route reply is built here"; the terminal return
+   also emits them (round 3).
+3. This ledger said `minimum: 1` was pinned by the frozen golden; the golden compares key
+   names only (round 3).
+4. A code comment justified the empty-operand guard by citing a schema `minLength` that does
+   not exist anywhere in the repository (round 3).
+
+Each was true of an earlier draft and false by the time the change around it was finished.
+Prose asserting a structural property is a claim that needs the same verification as a test.
+
+### Advisories applied
+
+The `Path` rustdoc now states the `min 1` floors it enforces; the CLI fixture owns its
+scratch directory from the moment the path exists, so the two filesystem `unwrap()`s above
+the `index` spawn are covered too (the round-2 repair guarded only the spawn); and
+`--max-depth` with no following value now has a test.
+
+### Refuted, and why
+
+- **Spec `Status: Approved` and 37 unchecked criteria** — refuted twice, rounds 1 and 3, on
+  the same ground: the Finish checklist owns that flip and runs after REVIEW by design.
+- **A store-free CLI argument-parsing seam**, and the spawn cost for pure-argument cases —
+  the spec's Testing Strategy explicitly chooses a spawn harness for exactly these
+  assertions, so the cost is a recorded tradeoff rather than a violated rule.
+- **Adding `minLength` to the schema** — the criterion requires only a schema that requires
+  `from` and `to`; the round-1 `depth` precedent is a precedent, not a rule. The comment was
+  reworded instead.
+- **`.loop-run/` as an undeclared ride-along** — sustained as advisory; it passes all four
+  carve-out clauses, so only its declaration was missing, and that surface is the PR body.

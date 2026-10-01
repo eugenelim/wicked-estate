@@ -878,8 +878,9 @@ impl RetrievalTool for TraverseGraph {
 /// ```
 /// * `from` / `to` — required; an exact symbol name, or a `SymbolId` (the form
 ///   `SearchEntity` and `TraverseGraph` hand back).
-/// * `depth`     — optional, default 8, max 16.
-/// * `max_nodes` — optional, default 1 000, max 5 000.
+/// * `depth`     — optional, default 8, min 1, max 16. A depth below 1 would expand
+///   nothing while reporting an unbounded search, so it is floored rather than honoured.
+/// * `max_nodes` — optional, default 1 000, min 1, max 5 000.
 ///
 /// **Response `content` shape**
 /// ```json
@@ -912,12 +913,14 @@ impl RetrievalTool for Path {
     }
 
     fn invoke(&self, store: &dyn GraphRead, request: &Value) -> Result<RetrievalResult> {
-        // Every no-route reply is built here, and the builder REQUIRES the reason. A branch
-        // cannot hand-build `unresolved: null` — the wire shape the spec licenses a reader to
-        // treat as "no route exists in the graph" — for a case that has not earned it. Round 1
-        // fixed `depth: 0` emitting that shape; round 2 found the same class one branch over,
-        // which is what this constructor exists to make impossible (CLAUDE.md §11: fix at the
-        // seam, not in N copies).
+        // Builds every reply that is decided BEFORE resolution — the unusable-operand
+        // branches below — and requires the reason, so none of them can hand-build
+        // `unresolved: null`, the wire shape the spec licenses a reader to treat as "no route
+        // exists in the graph". Replies decided AFTER resolution come from the terminal
+        // return at the end of this function, where the same five keys are built from
+        // `PathResult`'s own earned values. Round 1 fixed `depth: 0` emitting an unearned
+        // proven absence; round 2 found the same class one branch over, which is what moving
+        // the pre-resolution branches behind one constructor prevents (CLAUDE.md §11).
         let no_route = |unresolved: Option<&str>, diag: Vec<String>| RetrievalResult {
             content: json!({
                 "hops": [], "found": false,
@@ -928,8 +931,10 @@ impl RetrievalTool for Path {
         };
 
         // An operand is unusable if it is absent, not a string, or empty. All three are
-        // unresolved INPUT, not absence of a route, and the schema's `minLength` does not
-        // relieve this surface of checking: a non-conforming client still reaches here.
+        // unresolved INPUT, not absence of a route. The advertised schema types these as
+        // strings but places no lower bound on their length, and a non-conforming client
+        // reaches this code regardless — so the check belongs here on its own terms, not as
+        // a backstop to something the schema promises.
         let operand = |key: &str| -> Option<&str> {
             match request.get(key) {
                 Some(Value::String(v)) if !v.is_empty() => Some(v.as_str()),
@@ -3754,6 +3759,129 @@ mod tests {
                 .any(|d| d.starts_with("R7-CONFIDENCE")),
             "0.5 is not below 0.5: {:?}",
             res.diagnostics
+        );
+    }
+
+    /// The advertised `"default": 8` must be the code's default. Every other test passes
+    /// `depth` explicitly, so raising the default was free.
+    #[test]
+    fn path_depth_default_is_eight() {
+        let at_default = path_chain_store(8, 0);
+        let ok = Path
+            .invoke(&at_default, &json!({"from": "name_f0_", "to": "name_f8_"}))
+            .unwrap();
+        assert_eq!(
+            ok.content["found"], true,
+            "an 8-hop chain is reachable at the advertised default"
+        );
+
+        let one_deeper = path_chain_store(9, 0);
+        let past = Path
+            .invoke(&one_deeper, &json!({"from": "name_f0_", "to": "name_f9_"}))
+            .unwrap();
+        assert_eq!(
+            past.content["found"], false,
+            "a 9-hop chain is not — which is what distinguishes a default of 8 from any \
+             larger value"
+        );
+    }
+
+    /// The advertised `"default": 1000` for `max_nodes`, likewise.
+    #[test]
+    fn path_node_budget_default_is_one_thousand() {
+        // A hub with 1 200 leaves: capped at the 1 000 default, not capped at 5 000.
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        let mut nodes = vec![make_node("hub", "hub", NodeKind::Function, "src/h.rs", 0)];
+        let mut edges = Vec::new();
+        for i in 0..1_200 {
+            let id = format!("leaf{i}");
+            nodes.push(make_node(&id, &id, NodeKind::Function, "src/l.rs", 1));
+            edges.push(make_call_edge("hub", &id));
+        }
+        nodes.push(make_node(
+            "island",
+            "island",
+            NodeKind::Function,
+            "src/i.rs",
+            2,
+        ));
+        store.upsert_nodes(&nodes).unwrap();
+        store.upsert_edges(&edges).unwrap();
+        store.commit_batch().unwrap();
+
+        let defaulted = Path
+            .invoke(&store, &json!({"from": "hub", "to": "island"}))
+            .unwrap();
+        assert_eq!(
+            defaulted.content["node_bounded"], true,
+            "1 200 leaves exceed the advertised default budget of 1 000"
+        );
+
+        let raised = Path
+            .invoke(
+                &store,
+                &json!({"from": "hub", "to": "island", "max_nodes": 5_000}),
+            )
+            .unwrap();
+        assert_eq!(
+            raised.content["node_bounded"], false,
+            "and do not exceed 5 000 — so the first assertion is about the DEFAULT, not \
+             about the graph"
+        );
+    }
+
+    /// The two reply constructors — `no_route` for pre-resolution branches and the terminal
+    /// return for everything after — must emit the same key set, or an agent reading
+    /// `depth_bounded` on an unusable-operand reply gets `null` where the documented shape
+    /// promises `false`.
+    #[test]
+    fn every_path_reply_carries_the_same_key_set() {
+        let store = fixture_store();
+        let deep = path_chain_store(6, 0);
+        let replies = [
+            // found
+            Path.invoke(&store, &json!({"from": "caller_fn", "to": "leaf_fn"})),
+            // proven absence
+            Path.invoke(&store, &json!({"from": "leaf_fn", "to": "caller_fn"})),
+            // bounded absence
+            Path.invoke(
+                &deep,
+                &json!({"from": "name_f0_", "to": "name_f6_", "depth": 2}),
+            ),
+            // unusable operand (pre-resolution branch)
+            Path.invoke(&store, &json!({"from": "caller_fn", "to": ""})),
+            // unresolvable value (post-resolution branch)
+            Path.invoke(&store, &json!({"from": "caller_fn", "to": "nope"})),
+        ];
+
+        let mut expected: Option<Vec<String>> = None;
+        for (i, r) in replies.into_iter().enumerate() {
+            let content = r.unwrap().content;
+            let mut keys: Vec<String> = content
+                .as_object()
+                .expect("content is an object")
+                .keys()
+                .cloned()
+                .collect();
+            keys.sort();
+            match &expected {
+                None => expected = Some(keys),
+                Some(first) => assert_eq!(
+                    &keys, first,
+                    "reply {i} has a different key set; the two constructors have drifted"
+                ),
+            }
+        }
+        assert_eq!(
+            expected.unwrap(),
+            vec![
+                "depth_bounded".to_string(),
+                "found".to_string(),
+                "hops".to_string(),
+                "node_bounded".to_string(),
+                "unresolved".to_string(),
+            ]
         );
     }
 

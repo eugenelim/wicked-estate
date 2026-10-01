@@ -4179,13 +4179,20 @@ mod path_render_tests {
     // `path_endpoint_json` are pure functions of a `PathResult`; `write_path_text` takes a
     // sink for the same reason, so all three are asserted directly here.
 
+    /// Built at line 41 (0-based), so `line` is 41 and `line_1based` is 42. `Span::ZERO`
+    /// would give 0 and 1 — both non-null, so dropping the `+ 1` or swapping the two values
+    /// would pass a non-nullness assertion while sending a reader to the wrong line.
+    const FIXTURE_LINE_0BASED: u32 = 41;
+
     fn node(id: &str, name: &str) -> Node {
+        let mut span = Span::ZERO;
+        span.start_line = FIXTURE_LINE_0BASED;
         Node::new(
             SymbolId(id.into()),
             NodeKind::Function,
             name,
             Language::new("rust"),
-            Location::new("src/a.rs", Span::ZERO),
+            Location::new("src/a.rs", span),
         )
     }
 
@@ -4221,6 +4228,18 @@ mod path_render_tests {
                     "{end}.{field} must render from PathResult::endpoints"
                 );
             }
+            // VALUES, not merely presence. Non-nullness passes for a dropped `+ 1` or a
+            // swap, and a consumer following the documented contract would be sent to the
+            // wrong line with nothing red.
+            assert_eq!(
+                hop[end]["line"], FIXTURE_LINE_0BASED,
+                "{end}.line is the 0-based span start"
+            );
+            assert_eq!(
+                hop[end]["line_1based"],
+                FIXTURE_LINE_0BASED + 1,
+                "{end}.line_1based is one MORE than `line`, not equal to it"
+            );
         }
         assert_eq!(doc["unresolved"], serde_json::Value::Null);
     }
@@ -4374,8 +4393,9 @@ mod path_render_tests {
         let text = rendered(&found_result(), "a_fn", "b_fn", 5_000);
         let hops: Vec<&str> = text.lines().filter(|l| l.contains("->")).collect();
         assert_eq!(hops.len(), 1);
-        assert!(hops[0].contains("a_fn (src/a.rs:1)"), "{}", hops[0]);
-        assert!(hops[0].contains("b_fn (src/a.rs:1)"), "{}", hops[0]);
+        // `loc()` renders 1-based, so line 41 shows as 42 — the same +1 the JSON pins.
+        assert!(hops[0].contains("a_fn (src/a.rs:42)"), "{}", hops[0]);
+        assert!(hops[0].contains("b_fn (src/a.rs:42)"), "{}", hops[0]);
         assert!(hops[0].contains("confidence"), "{}", hops[0]);
     }
 

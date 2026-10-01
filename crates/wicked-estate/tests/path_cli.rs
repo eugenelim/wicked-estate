@@ -39,7 +39,12 @@ impl Drop for Scratch {
 fn indexed_chain(tag: &str, depth: usize) -> Scratch {
     let d = std::env::temp_dir().join(format!("ci_pathcli_{tag}_{}", std::process::id()));
     let _ = fs::remove_dir_all(&d);
-    fs::create_dir_all(d.join("src")).unwrap();
+    // Own the directory from the moment its path exists, so EVERY fallible step below is
+    // covered — the round-2 repair guarded only the `index` spawn, leaving the two
+    // filesystem calls able to panic and leak the very directory this handle exists to
+    // clean up.
+    let scratch = Scratch(d);
+    fs::create_dir_all(scratch.join("src")).unwrap();
 
     // f0 calls f1 calls f2 … so the dependency direction runs f0 → fN.
     let mut src = String::new();
@@ -50,10 +55,8 @@ fn indexed_chain(tag: &str, depth: usize) -> Scratch {
             src.push_str(&format!("fn f{i}() {{ f{}(); }}\n", i + 1));
         }
     }
-    fs::write(d.join("src/a.rs"), src).unwrap();
+    fs::write(scratch.join("src/a.rs"), src).unwrap();
 
-    // Take ownership BEFORE the fallible step, so a failed index cleans up too.
-    let scratch = Scratch(d);
     let out = Command::new(bin())
         .current_dir(&*scratch)
         .args(["index", ".", "--db", "graph.db"])
@@ -64,6 +67,43 @@ fn indexed_chain(tag: &str, depth: usize) -> Scratch {
         "index failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+    scratch
+}
+
+/// Run `git` in `dir`, failing loudly. Used to make a fixture that can actually go stale.
+fn git(dir: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@example.invalid")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@example.invalid")
+        .output()
+        .unwrap_or_else(|e| panic!("spawn git {args:?}: {e}"));
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A chain fixture that is a git repo with a commit made AFTER indexing, so the staleness
+/// notice genuinely fires.
+///
+/// Without this, `json_mode_emits_no_staleness_notice` asserted the absence of a string the
+/// fixture could never produce — a plain temp dir makes `commits_behind` return `None`, so
+/// deleting the `if !json_out` guard left every test green.
+fn indexed_stale_chain(tag: &str, depth: usize) -> Scratch {
+    let scratch = indexed_chain(tag, depth);
+    git(&scratch, &["init", "-q"]);
+    git(&scratch, &["add", "-A"]);
+    git(&scratch, &["commit", "-qm", "base"]);
+    // A commit strictly after the db's mtime is what `commits_behind` counts.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    fs::write(scratch.join("src/later.rs"), "fn later() {}\n").unwrap();
+    git(&scratch, &["add", "-A"]);
+    git(&scratch, &["commit", "-qm", "after indexing"]);
     scratch
 }
 
@@ -146,16 +186,28 @@ fn json_mode_emits_one_document_with_denormalized_endpoints() {
     }
 }
 
+/// The `--json` single-document contract, on a fixture that CAN go stale.
+///
+/// Text mode must print the notice (otherwise the fixture proves nothing); `--json` must
+/// not, because a notice on stdout would corrupt the one-document guarantee a caller parses.
 #[test]
-fn json_mode_emits_no_staleness_notice() {
-    let d = indexed_chain("quiet", 2);
+fn json_mode_suppresses_a_staleness_notice_that_text_mode_shows() {
+    let d = indexed_stale_chain("quiet", 2);
+
+    let text = stdout_of(&path_in(&d, &["f0", "f2"]));
+    assert!(
+        text.contains("STALENESS") || text.to_lowercase().contains("stale"),
+        "precondition: this fixture must actually be stale, or the --json half proves \
+         nothing:\n{text}"
+    );
+
     let out = path_in(&d, &["f0", "f2", "--json"]);
     let s = stdout_of(&out);
     assert!(
-        !s.contains("STALENESS") && !s.contains("stale"),
-        "notices would corrupt the single-document contract:\n{s}"
+        !s.contains("STALENESS") && !s.to_lowercase().contains("stale"),
+        "a notice on stdout would corrupt the single-document contract:\n{s}"
     );
-    let _ = json_of(&out); // parses as exactly one document
+    let _ = json_of(&out); // and it still parses as exactly one document
 }
 
 // ── honesty on absence ───────────────────────────────────────────────────────
@@ -247,6 +299,23 @@ fn an_unknown_double_dash_token_is_rejected_not_taken_as_an_operand() {
         "an unrecognised --flag must not be resolved as a symbol name"
     );
     assert!(String::from_utf8_lossy(&out.stderr).contains("unknown flag"));
+}
+
+/// `--max-depth` as the final token, with no value. Without this the branch could be
+/// mutated to ignore the flag and silently run at the default depth on a user typo.
+#[test]
+fn max_depth_without_a_value_is_a_usage_error() {
+    let d = indexed_chain("noval", 2);
+    let out = path_in(&d, &["f0", "f2", "--max-depth"]);
+    assert!(
+        !out.status.success(),
+        "a flag with no value must exit non-zero"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("requires a value"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]
