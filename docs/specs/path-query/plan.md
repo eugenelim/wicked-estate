@@ -1,7 +1,7 @@
 # Plan: path query — the route from A to B
 
 - **Spec:** [`spec.md`](spec.md)
-- **Status:** Approved
+- **Status:** Done
 - **Repository anchors:** `docs/ENGINE-CONTRACT.md` (edge direction `source = dependent`,
   bounded-traversal rule) and `CLAUDE.md` (Universal Don'ts: bounded traversal only, no
   N-statements-per-node, confidence + provenance on every edge). Analogous implementations:

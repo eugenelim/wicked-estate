@@ -306,3 +306,49 @@ the `index` spawn are covered too (the round-2 repair guarded only the spawn); a
   reworded instead.
 - **`.loop-run/` as an undeclared ride-along** — sustained as advisory; it passes all four
   carve-out clauses, so only its declaration was missing, and that surface is the PR body.
+
+## Completion evidence (2026-09-30)
+
+**Acceptance criteria.** All 37 marked met. The mechanically checkable ones were verified
+rather than assumed: `git diff` confirms no method added to `GraphRead`/`GraphWrite` and no
+change under `crates/wicked-estate-store/src/`; no tool count or roster moved in any
+document; the command appears in `README.md` and `docs/getting-started.md`; the
+`Subgraph::truncated` rustdoc correction is in place; and the count-bearing-prose grep over
+the three MCP files returns nothing live.
+
+**Verification.** `cargo build --workspace` 0 warnings · `cargo clippy --workspace
+--all-targets -- -D warnings` clean · `cargo test --workspace` 1515 passing, 0 failures ·
+`cargo fmt --all --check` clean · `lint-spec-status.py --all` clean.
+
+Per-crate: core 63 · store 165 · retrieve 131 · wicked-estate 210 · mcp 100.
+
+**Manual QA.** Recorded above — the real binary answering issue #192's own question, which
+also drove a code change (raw `SymbolId` blobs → `name (file:line)`).
+
+**Review.** Pre-EXECUTE: 14 rounds, 73 sustained, 36 refuted. Post-GATES: 3 rounds across two
+reviewers, 23 sustained, 11 refuted. Every report persisted and independently adjudicated;
+one adjudication was rejected as `invalid` by the strict classifier and re-run rather than
+read past. No unresolved Blocker or Concern remains.
+
+**Mutation evidence.** 13 mechanisms carry a falsifier confirmed by running its mutant and
+watching exactly one test die. Listed per round above.
+
+**Durable outputs.** `README.md`, `docs/getting-started.md`, `CHANGELOG.md`, the `Path`
+tool's own schema and description, the three MCP test files, this ledger, and the
+disposition record.
+
+**Pull request: `permission-insufficient`.** `gh api user` succeeds and `viewerPermission`
+reports `READ`, which is outside `WRITE`/`MAINTAIN`/`ADMIN`, so no PR was opened. The nine
+commits sit on `eugenelim/path-query`.
+
+**Bundled fixes** (for whoever opens the PR):
+- `.gitignore`: `.context/` — work-loop session artifacts (raw reviewer reports,
+  adjudications). Required before any reviewer report could be written; no behaviour change.
+- `.gitignore`: `.loop-run/` — work-loop engine state scratch. Same class, entered in the
+  first commit; admissible as a ride-along under all four carve-out clauses, and recorded
+  here because its declaration was the only thing missing.
+
+**Not done, and deliberately.** The repository-wide tool-count and roster refresh
+(`29 → 30` across six documents plus `site/`) is out of scope by owner decision and is the
+first entry under the spec's Follow-ons. It is **not filed** — filing it means opening a
+GitHub issue, which needs the owner's say-so.
