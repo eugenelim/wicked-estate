@@ -27,11 +27,13 @@ The server is invoked the same way everywhere:
 Use an **absolute** DB path — clients launch the server with an unpredictable working directory.
 (Alternatively set `WICKED_ESTATE_DB` in the server's `env`; `--db` takes precedence.)
 
-It exposes **24 tools across 3 domains** plus `SemanticSearch` when embeddings are present:
+It exposes **30 tools across 3 domains** plus `SemanticSearch` when embeddings are present:
 
 **Estate (12 tools):** `SearchEntity`, `RetrieveEntity`, `TraverseGraph`, `Path`, `BlastRadius`, `FetchContent`, `ContextBundle`, `RulesInventory`, `rules.recall`, `RankHotspots`, `Communities`, `Lineage`
 
-**Memory (6 tools):** `memory.capture`, `memory.recall`, `memory.reflect`, `memory.erase`, `memory.learn`, `memory.coverage`
+**Memory (7 tools):** `memory.capture`, `memory.recall`, `memory.reflect`, `memory.erase`, `memory.learn`, `memory.coverage`, `memory.list`
+
+**Proposal queue (4 tools, memory domain):** `proposal.submit`, `proposal.list`, `proposal.approve`, `proposal.reject`
 
 **Knowledge (7 tools):** `knowledge.ingest`, `knowledge.write`, `knowledge.relate`, `knowledge.recall`, `knowledge.coverage`, `knowledge.relate_code`, `knowledge.recall_about_code`
 

@@ -315,6 +315,10 @@ attached, so the agent can tell a precise hop from a heuristic one.
       The check is a reviewer reading the diff: five review rounds established
       that no regex closes the set of ways prose states a number, so this spec
       makes no claim one does.
+      *Superseded at merge (maintainers' review of #221): the documentation
+      refresh was folded into this PR, so the tool counts and estate rosters in
+      `README.md`, `CLAUDE.md`, `docs/`, the MCP crate README and the site now
+      include `Path`.*
 - [x] `cargo test -p wicked-estate-mcp` passes with every tool-count assertion
       reading its new value (estate 12, total 30, read-only surface 20,
       unconditional floor 12, floor-plus-semantic 13), and no assertion
@@ -341,6 +345,10 @@ attached, so the agent can tell a precise hop from a heuristic one.
       store does: every backend sets it from the `max_nodes` cap alone.
       Correcting it is in scope here because this change is the first to depend
       on that distinction.
+      *Superseded at merge: #222 (wicked-estate#190) landed first and made
+      `truncated` exactly `node_cap_reached || depth_horizon_reached`, so its
+      rustdoc follows #222 and `path_between` reads `node_cap_reached` for the
+      node bound.*
 
 ## Follow-ons
 
