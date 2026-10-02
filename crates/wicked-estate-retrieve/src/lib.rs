@@ -28,6 +28,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use wicked_estate_core::{
     Annotation, Direction, EdgeKind, GraphRead, Node, NodeKind, Result, RetrievalResult,
     RetrievalTool, SymbolId, SymbolQuery, TraversalSpec, edge_tags, is_advisory,
+    is_structural_symbol,
 };
 
 // W12 — one-shot context bundle tool (seed + ranked neighbours + budgeted stubs). Lives in its
@@ -339,10 +340,7 @@ pub(crate) fn find_seed_symbols(
         let raw = store.find_symbols(&query)?;
         let saturated = raw.len() >= limit;
         let total = raw.len();
-        let kept: Vec<Node> = raw
-            .into_iter()
-            .filter(|node| !node.is_value_flow_node())
-            .collect();
+        let kept: Vec<Node> = raw.into_iter().filter(is_structural_symbol).collect();
         let hidden = total - kept.len();
         let enough = kept.len() >= want;
         out = (kept, hidden);
@@ -1473,9 +1471,31 @@ impl RetrievalTool for Lineage {
             })
             .collect();
 
-        // Confidence stats over the traversal's edges.
+        // The edges this answer describes. Default lineage keeps its historical summary over the
+        // whole traversal. In `flows_to` mode it is the flow hops between admitted nodes only:
+        // a store's traverse also returns the frontier's incident edges (SQLite's `b → c` when
+        // `depth` stopped at `b`) and the visited nodes' other edges (a value slot's
+        // `File`→value `Contains`). Those carry no classification, and emitting them as flow
+        // evidence — or counting them in its confidence — would be exactly the unlabelled claim
+        // this wave exists to remove.
+        let admitted: HashSet<&str> = subgraph.nodes.iter().map(|n| n.symbol.as_str()).collect();
+        let described: Vec<&wicked_estate_core::Edge> = if semantic_flow {
+            subgraph
+                .edges
+                .iter()
+                .filter(|edge| {
+                    wicked_estate_core::is_flow_edge(edge)
+                        && admitted.contains(edge.source.as_str())
+                        && admitted.contains(edge.target.as_str())
+                })
+                .collect()
+        } else {
+            subgraph.edges.iter().collect()
+        };
+
+        // Confidence stats over the described edges.
         let (conf_min, conf_avg, edge_count) = {
-            let confs: Vec<f32> = subgraph.edges.iter().map(|e| e.confidence.get()).collect();
+            let confs: Vec<f32> = described.iter().map(|e| e.confidence.get()).collect();
             if confs.is_empty() {
                 (None, None, 0usize)
             } else {
@@ -1505,8 +1525,7 @@ impl RetrievalTool for Lineage {
         }
 
         // R7 — flag any low-confidence edges.
-        let low_conf: usize = subgraph
-            .edges
+        let low_conf: usize = described
             .iter()
             .filter(|e| e.confidence.get() < 0.5)
             .count();
@@ -1516,11 +1535,35 @@ impl RetrievalTool for Lineage {
             ));
         }
 
+        // TS-S1 / R7: in `flows_to` mode the hop LIST alone is not an answer — "a flows to b" is
+        // a different claim depending on whether the value is preserved or merely contributes,
+        // and on whether the fact came from syntax, a 0.5-confidence resolved call, or a
+        // framework naming convention. The node rows carry none of that, so the flow edges ride
+        // alongside them with their classification, evidence and site — the `described` hops.
+        let flow_rows: Option<Vec<Value>> =
+            semantic_flow.then(|| described.iter().map(|edge| flow_hop_row(edge)).collect());
+
         // R4 (DoD-A8) — `max_nodes=5000` bounds the traversal, but 5000 wide rows can still exceed
-        // the 25K-char budget. Cap the serialized `dependencies` array under the budget and emit a
-        // loud truncation diagnostic when it bites, on top of the depth/node-cap note above.
-        let envelope_overhead = 160; // dependencies + total + truncated + confidence scaffolding.
-        let (dependencies, dropped) = cap_rows_to_budget(dependencies, envelope_overhead);
+        // the 25K-char budget. ONE budget covers the whole content: in `flows_to` mode the
+        // `dependencies` and `flows` arrays share it (each is guaranteed half when both
+        // overflow, and either may use what the other leaves), and a row dropped from EITHER
+        // array sets `truncated` — a cut evidence list must never read as complete.
+        let available = R4_CHAR_BUDGET.saturating_sub(LINEAGE_ENVELOPE_OVERHEAD);
+        let serialized_len =
+            |rows: &[Value]| serde_json::to_string(rows).map_or(usize::MAX, |s| s.len());
+        let deps_budget = match &flow_rows {
+            None => available,
+            Some(flows) => {
+                let flows_len = serialized_len(flows);
+                if serialized_len(&dependencies).saturating_add(flows_len) <= available {
+                    available
+                } else {
+                    (available / 2).max(available.saturating_sub(flows_len))
+                }
+            }
+        };
+        let (dependencies, dropped) =
+            cap_rows_to_budget(dependencies, R4_CHAR_BUDGET.saturating_sub(deps_budget));
         if dropped > 0 {
             diag.push(format!(
                 "Lineage: result truncated to {} dependency/dependencies to stay under the \
@@ -1530,22 +1573,78 @@ impl RetrievalTool for Lineage {
                 dropped
             ));
         }
-        let truncated = node_truncated || dropped > 0;
+        let flow_rows = flow_rows.map(|rows| {
+            let used = LINEAGE_ENVELOPE_OVERHEAD.saturating_add(serialized_len(&dependencies));
+            let total_flows = rows.len();
+            let (rows, flow_dropped) = cap_rows_to_budget(rows, used);
+            if flow_dropped > 0 {
+                diag.push(format!(
+                    "Lineage: result truncated to {} of {total_flows} flow-evidence row(s) to \
+                     stay under the {R4_CHAR_BUDGET}-char R4 budget ({flow_dropped} dropped); \
+                     the `dependencies` list shares the budget, so a lower `depth` or a \
+                     narrower start returns the full evidence",
+                    rows.len()
+                ));
+            }
+            (rows, flow_dropped)
+        });
+        let flow_dropped = flow_rows.as_ref().map_or(0, |(_, d)| *d);
+        let truncated = node_truncated || dropped > 0 || flow_dropped > 0;
         let total = dependencies.len();
 
+        let mut content = json!({
+            "dependencies": dependencies,
+            "total": total,
+            "truncated": truncated,
+            "depth_horizon_reached": subgraph.depth_horizon_reached,
+            "node_cap_reached": subgraph.node_cap_reached,
+            "searched_depth": max_depth,
+            "confidence": conf_json,
+        });
+        if let Some((rows, _)) = flow_rows {
+            content["flows"] = Value::Array(rows);
+        }
+
         Ok(RetrievalResult {
-            content: json!({
-                "dependencies": dependencies,
-                "total": total,
-                "truncated": truncated,
-                "depth_horizon_reached": subgraph.depth_horizon_reached,
-                "node_cap_reached": subgraph.node_cap_reached,
-                "searched_depth": max_depth,
-                "confidence": conf_json,
-            }),
+            content,
             diagnostics: diag,
         })
     }
+}
+
+/// One `flows_to` hop, rendered with everything a caller needs to judge it: the two orthogonal
+/// classifications (what the edge CLAIMS vs. HOW we know), the evidence strength the engine
+/// contract already required on every edge, and the exact site.
+///
+/// `producer`/`consumer` are the semantic-forward names, not the stored ones: the stored edge is
+/// `source = consumer`, `target = producer` (engine invariant), and `Lineage` presents lineage in
+/// the direction the value actually travels.
+fn flow_hop_row(edge: &wicked_estate_core::Edge) -> Value {
+    let mut row = json!({
+        "producer": edge.target.as_str(),
+        "consumer": edge.source.as_str(),
+        "confidence": edge.confidence.get(),
+        "provenance": serde_json::to_value(&edge.provenance).unwrap_or(Value::Null),
+        "resolved_by": edge.resolved_by,
+    });
+    for key in [
+        wicked_estate_core::flow::FLOW_SEMANTICS_KEY,
+        wicked_estate_core::flow::FLOW_EVIDENCE_KEY,
+        wicked_estate_core::flow::FLOW_CONSTRUCTS_KEY,
+        wicked_estate_core::flow::FLOW_RULES_KEY,
+        wicked_estate_core::flow::FLOW_SUPPORT_KEY,
+        wicked_estate_core::flow::FLOW_SUPPORT_TRUNCATED_KEY,
+        wicked_estate_core::flow::FLOW_CONFIDENCE_MIN_KEY,
+    ] {
+        if let Some(value) = edge.metadata.get(key) {
+            row[key] = value.clone();
+        }
+    }
+    if let Some(location) = &edge.location {
+        row["file"] = Value::String(location.file.clone());
+        row["line"] = json!(location.span.start_line);
+    }
+    row
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1557,6 +1656,11 @@ impl RetrievalTool for Lineage {
 /// wide graph, so they cap the row count to keep the payload under this budget and emit a loud
 /// truncation diagnostic when the cap bites — an agent must never silently reason over a cut body.
 const R4_CHAR_BUDGET: usize = 25_000;
+
+/// Headroom for Lineage's non-array keys: `total`, `truncated`, the three #222 horizon keys,
+/// `confidence` (two f32s rendered at full precision plus `edge_count`) and the `flows` key, with
+/// margin. Everything else in the payload is one of the two capped row arrays.
+const LINEAGE_ENVELOPE_OVERHEAD: usize = 320;
 
 /// Trim `items` (already in priority order: best first) until the serialized JSON array fits under
 /// [`R4_CHAR_BUDGET`], leaving headroom for the surrounding envelope keys. Returns the kept rows and
@@ -2046,8 +2150,13 @@ pub fn render_context(
     let ranked_set: HashSet<SymbolId> = ordered.iter().cloned().collect();
     for id in &candidate_ids {
         if !ranked_set.contains(id) {
+            // TS-S1: the same applies to synthetic value-flow slots. `render_context` expands
+            // with an all-edge-kind `Both` traversal, so a seed's `File`→value `Contains` edges
+            // drag every local in the file into the tail; the ContextPack SEEDS were isolated in
+            // wicked-estate#207 but its BODY was not.
             if let Some(n) = store.get_node(id)? {
-                if matches!(n.kind, NodeKind::File | NodeKind::Import) {
+                if matches!(n.kind, NodeKind::File | NodeKind::Import) || !is_structural_symbol(&n)
+                {
                     continue;
                 }
             }
@@ -2830,29 +2939,61 @@ impl RetrievalTool for SemanticSearch {
         let k = opt_u64(request, "k").unwrap_or(10).min(100) as usize;
         let qvec = self.embedder.embed(&query_str);
 
-        let vs = self
-            .vector_store
-            .lock()
-            .expect("VectorStore mutex poisoned");
-        let hits = vs.nearest(&qvec, k)?;
-        drop(vs); // release mutex before the graph node lookups
-
-        let mut matches = Vec::with_capacity(hits.len());
-        for (id, sim) in &hits {
-            let Some(node) = store.get_node(id)? else {
-                continue;
-            };
-            matches.push(json!({
-                "symbol": node.symbol.as_str(),
-                "name": node.name,
-                "kind": serde_json::to_value(&node.kind).unwrap_or(Value::Null),
-                "file": node.location.file,
-                "line": node.location.span.start_line,
-                "similarity": sim,
-            }));
+        // TS-S1: embeddings are computed over every node, so synthetic value slots are in the
+        // ANN index. Filtering at READ needs no embeddings-table backfill; the storage-level
+        // residual is named in the visibility matrix (ENGINE-CONTRACT §3.3). The filter must run
+        // BEFORE `k` is applied, or slots nearest the query consume the whole window: over-fetch
+        // (the same bounded escalation as `find_seed_symbols`) and keep the first `k` eligible.
+        const ESCALATED_CANDIDATES: usize = 5_000;
+        let mut matches = Vec::with_capacity(k);
+        let mut candidate_cap_hit = false;
+        for (round, limit) in [k.saturating_mul(10).clamp(k, 500), ESCALATED_CANDIDATES]
+            .into_iter()
+            .enumerate()
+        {
+            let hits = {
+                let vs = self
+                    .vector_store
+                    .lock()
+                    .expect("VectorStore mutex poisoned");
+                vs.nearest(&qvec, limit)?
+            }; // the mutex is released before the graph node lookups
+            let saturated = hits.len() >= limit;
+            matches.clear();
+            for (id, sim) in &hits {
+                if matches.len() == k {
+                    break;
+                }
+                let Some(node) = store.get_node(id)? else {
+                    continue;
+                };
+                if !is_structural_symbol(&node) {
+                    continue;
+                }
+                matches.push(json!({
+                    "symbol": node.symbol.as_str(),
+                    "name": node.name,
+                    "kind": serde_json::to_value(&node.kind).unwrap_or(Value::Null),
+                    "file": node.location.file,
+                    "line": node.location.span.start_line,
+                    "similarity": sim,
+                }));
+            }
+            candidate_cap_hit = saturated && matches.len() < k;
+            if !candidate_cap_hit || round == 1 {
+                break;
+            }
         }
 
         let mut diag = vec![staleness_note()];
+        if candidate_cap_hit {
+            diag.push(format!(
+                "SemanticSearch: returned {} of k={k}; the nearest {ESCALATED_CANDIDATES} \
+                 candidates were mostly synthetic value-flow slots, so more structural matches \
+                 may exist further out",
+                matches.len()
+            ));
+        }
         if matches.is_empty() {
             diag.push(format!(
                 "SemanticSearch: no symbols found for query '{query_str}' \
@@ -3072,8 +3213,11 @@ pub fn budget_context(
         limit: Some(10),
         ..Default::default()
     };
-    let fts_hits = store.find_symbols(&fts_query)?;
-    for node in fts_hits {
+    // TS-S1: `budget_context`'s seeds route through `find_seed_symbols`, but this supplementary
+    // FTS pass went to the store raw — for a common identifier it re-admitted exactly the
+    // synthetic value slots the seed filter had just excluded.
+    let (fts_hits, _) = find_seed_symbols(store, &fts_query, 10)?;
+    for node in fts_hits.into_iter().take(10) {
         if !seed_ids.contains(&node.symbol) {
             scores.entry(node.symbol.clone()).or_insert(1.0);
         }
@@ -3093,6 +3237,11 @@ pub fn budget_context(
         let Some(node) = store.get_node(id)? else {
             continue;
         };
+        // TS-S1: the neighbour pass above walks ALL edge kinds, so a seed's `File`→value
+        // `Contains` and `flows_to` edges reach synthetic slots. Context is a structural answer.
+        if !is_structural_symbol(&node) {
+            continue;
+        }
         let node_size = node.name.len() + node.location.file.len() + 100;
         if chars_used + node_size > max_chars {
             break;
@@ -4764,6 +4913,231 @@ mod tests {
         assert_eq!(default.content["total"].as_u64(), Some(0));
     }
 
+    /// #222 (0.18.0) published `depth_horizon_reached`, `node_cap_reached` and `searched_depth`
+    /// on Lineage. The flows_to rework rebuilt Lineage's content object; pin the three keys in
+    /// BOTH modes so a rebuild cannot silently drop them again (no test caught it before).
+    #[test]
+    fn lineage_carries_horizon_keys_in_default_and_flows_to_modes() {
+        let store = flow_fan_out_store(1);
+        for args in [
+            json!({"symbol": "producer", "depth": 8}),
+            json!({"symbol": "producer", "depth": 8, "relation": "flows_to"}),
+        ] {
+            let res = Lineage.invoke(&store, &args).unwrap();
+            assert_eq!(
+                res.content["searched_depth"],
+                json!(8),
+                "searched_depth missing or wrong for {args}: {}",
+                res.content
+            );
+            assert_eq!(
+                res.content["depth_horizon_reached"],
+                json!(false),
+                "depth_horizon_reached missing for {args}: {}",
+                res.content
+            );
+            assert_eq!(
+                res.content["node_cap_reached"],
+                json!(false),
+                "node_cap_reached missing for {args}: {}",
+                res.content
+            );
+        }
+    }
+
+    /// `producer` flows into `n` wide-named consumers (stored `consumer → producer`, the engine
+    /// invariant), each a Variable so both arrays carry one row per consumer.
+    fn flow_fan_out_store(n: usize) -> MemStore {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        let mut nodes: Vec<Node> = (0..n).map(wide_node).collect();
+        nodes.push(make_node(
+            "producer",
+            "route_id",
+            NodeKind::Variable,
+            "fixture.ts",
+            1,
+        ));
+        store.upsert_nodes(&nodes).unwrap();
+        let edges: Vec<Edge> = (0..n)
+            .map(|i| {
+                Edge::new(
+                    SymbolId(wide_id(i)),
+                    SymbolId("producer".to_string()),
+                    edge_tags::other(edge_tags::FLOWS_TO),
+                    ResolutionTier::Parsed,
+                    "test-fixture",
+                )
+            })
+            .collect();
+        store.upsert_edges(&edges).unwrap();
+        store.commit_batch().unwrap();
+        store
+    }
+
+    /// R4 holds for the WHOLE `flows_to` payload, and a dropped `flows` row is reported in
+    /// `truncated`. Before the fix, `flows` had its own ~12.5K budget on top of `dependencies`
+    /// (37K+ chars on a 300-way fan-out), and on a 60-way fan-out all 60 dependencies fit while
+    /// 42 flow rows were dropped under `truncated:false`.
+    #[test]
+    fn lineage_flows_to_shares_one_r4_budget_and_reports_dropped_flows() {
+        for n in [60usize, 300] {
+            let store = flow_fan_out_store(n);
+            let res = Lineage
+                .invoke(
+                    &store,
+                    &json!({"symbol": "producer", "depth": 1, "relation": "flows_to"}),
+                )
+                .unwrap();
+            let payload = serde_json::to_string(&res.content).unwrap();
+            assert!(
+                payload.len() <= R4_CHAR_BUDGET,
+                "n={n}: Lineage flows_to payload must be <= {R4_CHAR_BUDGET} chars, got {}",
+                payload.len()
+            );
+            let deps = res.content["dependencies"].as_array().unwrap().len();
+            let flows = res.content["flows"].as_array().unwrap().len();
+            assert!(
+                deps < n || flows < n,
+                "n={n}: fixture must actually overflow the budget (deps={deps}, flows={flows})"
+            );
+            assert_eq!(
+                res.content["truncated"],
+                json!(true),
+                "n={n}: deps={deps}/{n} flows={flows}/{n} dropped rows must set truncated"
+            );
+            assert!(
+                flows > 0 && deps > 0,
+                "n={n}: neither array may be starved (deps={deps}, flows={flows})"
+            );
+        }
+    }
+
+    /// The fixed `LINEAGE_ENVELOPE_OVERHEAD` must cover the real non-array keys at their widest:
+    /// full-precision f32 confidences, a node-capped `total`, the depth ceiling and a 9-digit
+    /// edge count. If a key is added to Lineage's content, this is the test that must grow.
+    #[test]
+    fn lineage_envelope_overhead_covers_the_widest_envelope() {
+        let widest = json!({
+            "dependencies": [],
+            "total": 5_000,
+            "truncated": false,
+            "depth_horizon_reached": false,
+            "node_cap_reached": false,
+            "searched_depth": BLAST_DEPTH_CEILING,
+            "confidence": {
+                "min": 0.123_456_79_f32,
+                "avg": 0.987_654_3_f32,
+                "edge_count": 999_999_999u64,
+            },
+            "flows": [],
+        });
+        let len = serde_json::to_string(&widest).unwrap().len();
+        assert!(
+            len < LINEAGE_ENVELOPE_OVERHEAD,
+            "widest Lineage envelope is {len} chars; LINEAGE_ENVELOPE_OVERHEAD is {LINEAGE_ENVELOPE_OVERHEAD}"
+        );
+    }
+
+    /// Copilot review of #231: SQLite's traverse also returns the frontier's incident edges, so
+    /// `a → b → c` at `depth=1` reported the `b → c` hop in `flows` although `c` is not in
+    /// `dependencies`, and the confidence summary counted the slots' `File` `Contains` edges.
+    /// In flows_to mode both are now drawn from flow edges whose ends were both admitted.
+    #[test]
+    fn lineage_flows_to_reports_only_hops_inside_the_answer() {
+        let mut store = wicked_estate_store::SqliteStore::in_memory().unwrap();
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[
+                make_node("f", "fixture.ts", NodeKind::File, "fixture.ts", 0),
+                make_node("a", "a", NodeKind::Variable, "fixture.ts", 1),
+                make_node("b", "b", NodeKind::Variable, "fixture.ts", 2),
+                make_node("c", "c", NodeKind::Variable, "fixture.ts", 3),
+            ])
+            .unwrap();
+        let flow = |consumer: &str, producer: &str| {
+            Edge::new(
+                SymbolId(consumer.to_string()),
+                SymbolId(producer.to_string()),
+                edge_tags::other(edge_tags::FLOWS_TO),
+                ResolutionTier::Parsed,
+                "test-fixture",
+            )
+        };
+        let contains = |child: &str| {
+            Edge::new(
+                SymbolId("f".to_string()),
+                SymbolId(child.to_string()),
+                EdgeKind::Contains,
+                ResolutionTier::Heuristic,
+                "test-fixture",
+            )
+        };
+        store
+            .upsert_edges(&[
+                flow("b", "a"),
+                flow("c", "b"),
+                contains("a"),
+                contains("b"),
+                contains("c"),
+            ])
+            .unwrap();
+        store.commit_batch().unwrap();
+
+        let res = Lineage
+            .invoke(
+                &store,
+                &json!({"symbol": "a", "depth": 1, "relation": "flows_to"}),
+            )
+            .unwrap();
+        let deps: Vec<&str> = res.content["dependencies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["symbol"].as_str().unwrap())
+            .collect();
+        assert_eq!(deps, vec!["b"], "{}", res.content);
+        let hops: Vec<(String, String)> = res.content["flows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| {
+                (
+                    f["producer"].as_str().unwrap().to_string(),
+                    f["consumer"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            hops,
+            vec![("a".to_string(), "b".to_string())],
+            "only the hop between admitted nodes: {}",
+            res.content
+        );
+        assert_eq!(
+            res.content["confidence"]["edge_count"],
+            json!(1),
+            "the summary must describe the same hops: {}",
+            res.content
+        );
+    }
+
+    /// Falsifier for the shared budget: a small flows_to answer keeps every row of both arrays
+    /// and reports `truncated:false`.
+    #[test]
+    fn lineage_flows_to_small_fan_out_keeps_everything() {
+        let store = flow_fan_out_store(5);
+        let res = Lineage
+            .invoke(
+                &store,
+                &json!({"symbol": "producer", "depth": 1, "relation": "flows_to"}),
+            )
+            .unwrap();
+        assert_eq!(res.content["dependencies"].as_array().unwrap().len(), 5);
+        assert_eq!(res.content["flows"].as_array().unwrap().len(), 5);
+        assert_eq!(res.content["truncated"], json!(false));
+    }
+
     // ── Reciprocal Rank Fusion ───────────────────────────────────────────────
 
     fn id(s: &str) -> SymbolId {
@@ -5956,6 +6330,55 @@ mod tests {
         assert!(
             res.diagnostics.iter().any(|d| d.contains("STALENESS")),
             "R5 staleness note"
+        );
+    }
+
+    /// Copilot review of #231: the value-slot filter ran after `nearest` had already cut the
+    /// candidates to `k`, so with `k=1` and a slot as the nearest embedding SemanticSearch
+    /// returned nothing while a real symbol was next in line.
+    #[test]
+    fn semantic_search_skips_value_slots_before_applying_k() {
+        let query = "route identifier";
+        let qvec = HashEmbedder::default().embed(query);
+        let build = || {
+            let mut store = MemStore::new();
+            store.begin_batch().unwrap();
+            store
+                .upsert_nodes(&[
+                    make_node("real", "routeIdentifier", NodeKind::Function, "src/a.ts", 1),
+                    make_node("slot", "routeIdentifier", NodeKind::Variable, "src/a.ts", 2)
+                        .with_value_role("Local"),
+                ])
+                .unwrap();
+            store.commit_batch().unwrap();
+            // The slot sits exactly on the query; the real symbol is close behind.
+            store
+                .set_embedding(&SymbolId("slot".to_string()), &qvec)
+                .unwrap();
+            let mut near = qvec.clone();
+            near[0] += 0.5;
+            store
+                .set_embedding(&SymbolId("real".to_string()), &near)
+                .unwrap();
+            store
+        };
+        let store = build();
+        let tool = SemanticSearch::with_hash_embedder(build());
+        let res = tool
+            .invoke(&store, &json!({"query": query, "k": 1}))
+            .unwrap();
+        let symbols: Vec<&str> = res.content["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["symbol"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            symbols,
+            vec!["real"],
+            "{} {:?}",
+            res.content,
+            res.diagnostics
         );
     }
 
