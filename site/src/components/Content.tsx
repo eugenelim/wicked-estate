@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from 'react'
    wicked-estate — THE FOUNDATION · the system of record.
 
    ROLE · estate is the foundation plane of the wicked platform: code graph +
-   memory + knowledge in ONE binary (29 MCP tools across 3 domains). It is the
+   memory + knowledge in ONE binary (30 MCP tools across 3 domains). It is the
    record every plane (crew · garden · studio) reads before it acts and writes
    after it's done — every plane reads and writes it through its contract, never
    around it. Steering doctrine projects into it as citable rules; governed
@@ -149,7 +149,7 @@ function Hero() {
             The <span className="text-ink">system of record</span> for your codebase — the record every plane
             (crew · garden · studio) <span className="text-ink">queries before it acts and writes after</span>. One
             local-first MCP server,{' '}
-            <span className="text-ink">29 tools across 3 domains</span>. What breaks if you change it, the decision
+            <span className="text-ink">30 tools across 3 domains</span>. What breaks if you change it, the decision
             behind it, the doc that explains it — including the{' '}
             <span className="text-ink">injected edges grep never sees</span>. Every fact stamped with confidence and
             provenance: a heuristic is never handed to an agent as a fact.
@@ -956,11 +956,12 @@ type ToolDomain = { no: string; name: string; note: string; tools: { name: strin
 
 const TOOL_DOMAINS: ToolDomain[] = [
   {
-    no: '01', name: 'Graph', note: '11 estate tools',
+    no: '01', name: 'Graph', note: '12 estate tools',
     tools: [
       { name: 'SearchEntity',   purpose: 'Find symbols by name or kind; optional source inline.' },
       { name: 'RetrieveEntity', purpose: 'One symbol’s full dossier — callers, edges, annotations, requirement.' },
       { name: 'TraverseGraph',  purpose: 'Bounded walk out over calls and imports.' },
+      { name: 'Path',           purpose: 'The route from A to B — every hop with its edge kind and confidence.' },
       { name: 'BlastRadius',    purpose: 'Every dependent — what breaks if you change it.' },
       { name: 'Lineage',        purpose: 'The dependency chain a symbol rests on, transitively.' },
       { name: 'RankHotspots',   purpose: 'Most-connected symbols by PageRank — where to start reading.' },
@@ -1048,7 +1049,7 @@ function FullToolface() {
         <div className="mb-2.5 w-full text-left">
           <span className="kicker">Everything an agent can call</span>
           <h2 className="mt-1.5 font-display text-2xl sm:text-[1.95rem] font-black text-ink leading-[0.98]">
-            29 MCP tools. 6 agent skills. <span style={{ color: 'var(--accent)' }}>One binary.</span>
+            30 MCP tools. 6 agent skills. <span style={{ color: 'var(--accent)' }}>One binary.</span>
           </h2>
           <p className="mt-1.5 text-sm text-muted font-sans leading-tight max-w-3xl">
             Not one “search” tool bolted onto a repo — the full MCP surface every plane calls, plus the skills
@@ -1383,7 +1384,7 @@ function Storage() {
             one <span className="font-mono text-sm font-semibold">open_store(spec)</span> factory: no caller changes,
             no re-index, and the Postgres backend passes the same store-conformance suite in CI. The{' '}
             <span className="font-mono text-sm font-semibold">WICKED_RUNTIME=team</span> profile seam retargets it
-            with one environment variable. The MCP server — the 29 tools — is{' '}
+            with one environment variable. The MCP server — the 30 tools — is{' '}
             <span className="text-ink">SQLite-only today</span>: under the team profile it fails loud at startup
             instead of silently falling back to local; Postgres for the MCP surface is the named follow-up.
             Local-first is a feature, not a ceiling.
@@ -1516,7 +1517,7 @@ export function GetStarted() {
         </div>
 
         <p className="mt-4 font-mono text-[0.6rem] text-faint tracking-wide">
-          Use an absolute DB path — clients launch from an unpredictable working directory. Same 29 tools in Claude Code, Antigravity, Codex, OpenCode, and Pi.
+          Use an absolute DB path — clients launch from an unpredictable working directory. Same 30 tools in Claude Code, Antigravity, Codex, OpenCode, and Pi.
         </p>
 
         <div className="mt-9 flex flex-col sm:flex-row gap-3">

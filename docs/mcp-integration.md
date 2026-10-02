@@ -29,7 +29,7 @@ Use an **absolute** DB path — clients launch the server with an unpredictable 
 
 It exposes **24 tools across 3 domains** plus `SemanticSearch` when embeddings are present:
 
-**Estate (11 tools):** `SearchEntity`, `RetrieveEntity`, `TraverseGraph`, `BlastRadius`, `FetchContent`, `ContextBundle`, `RulesInventory`, `rules.recall`, `RankHotspots`, `Communities`, `Lineage`
+**Estate (12 tools):** `SearchEntity`, `RetrieveEntity`, `TraverseGraph`, `Path`, `BlastRadius`, `FetchContent`, `ContextBundle`, `RulesInventory`, `rules.recall`, `RankHotspots`, `Communities`, `Lineage`
 
 **Memory (6 tools):** `memory.capture`, `memory.recall`, `memory.reflect`, `memory.erase`, `memory.learn`, `memory.coverage`
 

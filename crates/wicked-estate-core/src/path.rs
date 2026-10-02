@@ -16,7 +16,11 @@ use crate::traits::GraphRead;
 use crate::{Direction, Result};
 
 /// Which endpoint of a path request could not be resolved.
+///
+/// `#[non_exhaustive]` so a new failure mode can be added without a breaking release; match it
+/// with a wildcard arm outside this crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Unresolved {
     From,
     To,
@@ -38,7 +42,11 @@ impl Unresolved {
 /// the graph. `found == false` with either flag set is a **bounded** absence: the search was
 /// cut off and a route may lie beyond it. Conflating the two is the R3 failure the engine
 /// contract forbids, which is why both flags are reported rather than one "truncated" bit.
+///
+/// `#[non_exhaustive]` so a new field (a further bound cause, say) is not a breaking change.
+/// Outside this crate, build one from `PathResult::default()` and assign the fields.
 #[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
 pub struct PathResult {
     /// The route, in order from `from` to `to`. Empty when `found` is false, and also when
     /// the two endpoints resolve to the same symbol (a zero-hop route is still `found`).
@@ -55,8 +63,8 @@ pub struct PathResult {
     /// Some candidate traversal reached its depth frontier — a node sits at exactly
     /// `max_depth` in its `depths` map.
     ///
-    /// Derived here, never read off [`Subgraph::truncated`], which no backend sets from the
-    /// depth cap. With a multi-match `from` this is the **disjunction** over every candidate
+    /// Derived here from `depths`, never read off [`Subgraph::truncated`], which folds the node
+    /// cap in as well. With a multi-match `from` this is the **disjunction** over every candidate
     /// traversal: reporting the winning candidate's flag alone would let a query whose other
     /// candidate walk was cut off return a proven-absence signal for a bounded search.
     ///
@@ -64,7 +72,10 @@ pub struct PathResult {
     /// route was found and when nothing remained to expand. `false` means the walk saw its
     /// whole reachable set; `true` does not mean a route exists further out.
     pub depth_bounded: bool,
-    /// Some candidate traversal exhausted its node budget ([`Subgraph::truncated`]).
+    /// Some candidate traversal exhausted its node budget ([`Subgraph::node_cap_reached`]).
+    ///
+    /// Read from the node-cap cause alone: [`Subgraph::truncated`] is also true when only the
+    /// depth horizon cut the walk, which would report a depth cut as a node-budget cut.
     ///
     /// Also a disjunction across candidates, for the same reason as `depth_bounded`.
     /// Backend-approximate: the stores budget on different populations (nodes with a stored
@@ -80,8 +91,10 @@ pub struct PathResult {
 
 /// Resolve one endpoint to its candidate symbols: exact name first, then `SymbolId`.
 ///
-/// The name query is identical to the one `blast-radius` issues, so matching semantics are
-/// the same across the two commands — by construction, not by sharing a helper (that helper
+/// The name query matches the one `blast-radius` issues, including its rule that a synthetic
+/// value-flow node (wicked-estate#207, `Node::is_value_flow_node`) is never resolved by NAME:
+/// those slots are addressable only by their exact `SymbolId`, which the fallback below still
+/// accepts. The same semantics hold by construction, not by sharing a helper (that helper
 /// lives in a crate core cannot depend on). Candidates are sorted by `SymbolId` string so the
 /// winner is a property of the data: `MemStore` sorts `find_symbols` by symbol string while
 /// `SqliteStore` orders by an autoincrement row id, and taking either store's order would
@@ -94,6 +107,7 @@ fn resolve(store: &dyn GraphRead, value: &str) -> Result<Vec<SymbolId>> {
     let mut ids: Vec<SymbolId> = store
         .find_symbols(&query)?
         .into_iter()
+        .filter(|n| !n.is_value_flow_node())
         .map(|n| n.symbol)
         .collect();
     if ids.is_empty() {
@@ -110,8 +124,8 @@ fn resolve(store: &dyn GraphRead, value: &str) -> Result<Vec<SymbolId>> {
 }
 
 /// True when this traversal reached its depth frontier — some node sits at exactly
-/// `max_depth`. This is the signal no store records: every backend sets
-/// [`Subgraph::truncated`] from the node cap alone.
+/// `max_depth`. Deliberately coarser than [`Subgraph::depth_horizon_reached`]: it is true
+/// whenever the frontier is touched, whether or not anything lay beyond it.
 fn touched_depth_frontier(subgraph: &Subgraph, max_depth: u32) -> bool {
     subgraph.depths.values().any(|d| *d >= max_depth)
 }
@@ -162,7 +176,7 @@ pub fn path_between(
     for start in &from_ids {
         let subgraph = store.traverse(start, &spec)?;
         depth_bounded |= touched_depth_frontier(&subgraph, max_depth);
-        node_bounded |= subgraph.truncated;
+        node_bounded |= subgraph.node_cap_reached;
 
         if let Some(hops) = subgraph.shortest_path(start, &to_ids) {
             let shorter = match &best {

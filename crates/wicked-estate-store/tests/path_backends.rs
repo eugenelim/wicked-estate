@@ -624,3 +624,79 @@ fn shortest_route_wins_across_from_candidates() {
         assert_eq!(r.hops[0].source, sym("z_short"), "{label}");
     }
 }
+
+/// #207's synthetic value-flow slots are not name-addressable (the 0.17.0 contract), and Path
+/// must not resolve one by name either. A real `a0 → a1`, a value slot that is ALSO named `a1`,
+/// and a value-only name: the value-only name is an unresolved operand, and the exact
+/// `SymbolId` of a slot still addresses it.
+#[test]
+fn value_flow_slots_never_resolve_by_name() {
+    let slot_a1 = "value synthetic x:local:a1:";
+    let slot_only = "value synthetic x:local:only_val:";
+    let mut nodes = vec![node("a0"), node("a1")];
+    nodes.push(named_node(slot_a1, "a1").with_value_role("local"));
+    nodes.push(named_node(slot_only, "only_val").with_value_role("local"));
+    let mut edges = vec![edge("a0", "a1")];
+    edges.push(Edge::new(
+        sym(slot_a1),
+        sym(slot_only),
+        EdgeKind::Other("flows_to".into()),
+        ResolutionTier::Parsed,
+        "test",
+    ));
+    for (label, store) in [
+        ("mem", Box::new(mem(&nodes, &edges)) as Box<dyn GraphRead>),
+        (
+            "sqlite",
+            Box::new(sqlite(&nodes, &edges)) as Box<dyn GraphRead>,
+        ),
+    ] {
+        let r = path_between(store.as_ref(), "a1", "only_val", 8, 1000).unwrap();
+        assert!(
+            !r.found,
+            "{label}: a value-only name must not resolve: {r:?}"
+        );
+        assert_eq!(
+            r.unresolved,
+            Some(Unresolved::To),
+            "{label}: a bare name resolved a value slot"
+        );
+        let r = path_between(store.as_ref(), slot_a1, slot_only, 8, 1000).unwrap();
+        assert!(
+            r.found,
+            "{label}: the exact SymbolId must still address a value slot"
+        );
+        let r = path_between(store.as_ref(), "a0", "a1", 8, 1000).unwrap();
+        assert_eq!(
+            hop_ids(&r.hops),
+            vec![("a0".to_string(), "a1".to_string())],
+            "{label}: the real a1 still resolves, and only it"
+        );
+    }
+}
+
+/// A depth cut is not a node-budget cut. `Subgraph::truncated` is true for either cause, so
+/// reading it for `node_bounded` reported "the walk exhausted its node budget (5000 nodes)"
+/// on a 7-node chain cut at depth 2.
+#[test]
+fn a_depth_cut_is_not_reported_as_a_node_budget_cut() {
+    let (nodes, edges) = chain(6);
+    for (label, store) in [
+        ("mem", Box::new(mem(&nodes, &edges)) as Box<dyn GraphRead>),
+        (
+            "sqlite",
+            Box::new(sqlite(&nodes, &edges)) as Box<dyn GraphRead>,
+        ),
+    ] {
+        let r = path_between(store.as_ref(), "a0", "a6", 2, 5000).unwrap();
+        assert!(!r.found, "{label}");
+        assert!(
+            r.depth_bounded,
+            "{label}: the depth frontier bound the walk"
+        );
+        assert!(
+            !r.node_bounded,
+            "{label}: 7 nodes never exhaust a 5000-node budget"
+        );
+    }
+}

@@ -4207,14 +4207,14 @@ mod path_render_tests {
     }
 
     fn found_result() -> PathResult {
-        PathResult {
-            hops: vec![hop("a", "b")],
-            endpoints: vec![node("a", "a_fn"), node("b", "b_fn")],
-            found: true,
-            depth_bounded: false,
-            node_bounded: false,
-            unresolved: None,
-        }
+        let mut r = PathResult::default();
+        r.hops = vec![hop("a", "b")];
+        r.endpoints = vec![node("a", "a_fn"), node("b", "b_fn")];
+        r.found = true;
+        r.depth_bounded = false;
+        r.node_bounded = false;
+        r.unresolved = None;
+        r
     }
 
     #[test]
@@ -4269,10 +4269,8 @@ mod path_render_tests {
 
     #[test]
     fn unresolved_to_names_the_to_operand_not_the_from_one() {
-        let r = PathResult {
-            unresolved: Some(Unresolved::To),
-            ..Default::default()
-        };
+        let mut r = PathResult::default();
+        r.unresolved = Some(Unresolved::To);
         let doc = path_json("resolvable", "missing", &r);
         assert_eq!(doc["unresolved"], "to");
         assert_eq!(doc["found"], false);
@@ -4280,11 +4278,9 @@ mod path_render_tests {
 
     #[test]
     fn json_reports_each_bound_separately() {
-        let bounded = PathResult {
-            depth_bounded: true,
-            node_bounded: true,
-            ..Default::default()
-        };
+        let mut bounded = PathResult::default();
+        bounded.depth_bounded = true;
+        bounded.node_bounded = true;
         let doc = path_json("a", "b", &bounded);
         assert_eq!(doc["found"], false);
         assert_eq!(doc["depth_bounded"], true);
@@ -4298,10 +4294,8 @@ mod path_render_tests {
 
     #[test]
     fn zero_hop_identity_route_is_found() {
-        let r = PathResult {
-            found: true,
-            ..Default::default()
-        };
+        let mut r = PathResult::default();
+        r.found = true;
         let doc = path_json("same", "same", &r);
         assert_eq!(doc["found"], true);
         assert_eq!(doc["hops"].as_array().unwrap().len(), 0);
@@ -4326,10 +4320,8 @@ mod path_render_tests {
     /// so collapsing the unresolved branch into a bare "no path found" was free.
     #[test]
     fn text_unresolved_operand_does_not_read_as_a_proven_absence() {
-        let unresolved = PathResult {
-            unresolved: Some(Unresolved::To),
-            ..Default::default()
-        };
+        let mut unresolved = PathResult::default();
+        unresolved.unresolved = Some(Unresolved::To);
         let text = rendered(&unresolved, "caller", "ghost", 5_000);
         assert!(
             text.contains("ghost"),
@@ -4361,10 +4353,8 @@ mod path_render_tests {
     /// truncated search as a proven absence.
     #[test]
     fn text_names_the_node_budget_when_it_bound() {
-        let bounded = PathResult {
-            node_bounded: true,
-            ..Default::default()
-        };
+        let mut bounded = PathResult::default();
+        bounded.node_bounded = true;
         let text = rendered(&bounded, "a", "b", 5_000);
         assert!(text.contains("node budget"), "{text}");
         assert!(
@@ -4379,10 +4369,8 @@ mod path_render_tests {
 
     #[test]
     fn text_names_the_depth_frontier_when_it_bound() {
-        let bounded = PathResult {
-            depth_bounded: true,
-            ..Default::default()
-        };
+        let mut bounded = PathResult::default();
+        bounded.depth_bounded = true;
         let text = rendered(&bounded, "a", "b", 5_000);
         assert!(text.contains("depth frontier"), "{text}");
         assert!(!text.contains("no route exists"), "{text}");
@@ -4401,10 +4389,8 @@ mod path_render_tests {
 
     #[test]
     fn text_zero_hop_identity_route_says_so() {
-        let same = PathResult {
-            found: true,
-            ..Default::default()
-        };
+        let mut same = PathResult::default();
+        same.found = true;
         let text = rendered(&same, "x", "x", 5_000);
         assert!(text.contains("same symbol"), "{text}");
         assert!(!text.contains("no path"), "{text}");

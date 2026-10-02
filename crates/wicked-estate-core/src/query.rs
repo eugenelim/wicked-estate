@@ -672,7 +672,7 @@ mod shortest_path_tests {
             nodes: node_ids.iter().map(|i| node(&sym(i))).collect(),
             edges: pairs.iter().map(|(s, t)| edge(&sym(s), &sym(t))).collect(),
             depths: BTreeMap::new(),
-            truncated: false,
+            ..Default::default()
         }
     }
 

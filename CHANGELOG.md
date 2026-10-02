@@ -53,6 +53,14 @@ Breaking for Rust callers, so the next release is 0.18.0, not 0.17.x. See **Chan
   Implemented over one bounded `traverse` per resolved start symbol — no new `GraphRead`
   method, no store change, no per-node query.
 
+  A bare name never resolves to one of #207's synthetic value-flow nodes (the 0.17.0 contract
+  that they are not name-addressable); pass the exact `SymbolId` to route from or to one. The
+  node-budget bound is read from `Subgraph::node_cap_reached`, so a depth cut is never reported
+  as an exhausted node budget. New public API in `wicked-estate-core`: `path_between`,
+  `PathResult` and `Unresolved` (both `#[non_exhaustive]`), `Subgraph::shortest_path`, and an
+  `Ord` derive on `EdgeKind`; parallel edges tie-break in variant declaration order. The MCP
+  server now lists 30 tools (12 estate).
+
 ### Fixed
 - **The BlastRadius depth flag describes the rows it returns (#222 review).** The horizon is
   probed on the all-edge-kinds walk, but BlastRadius returns the `code_dependents` projection,
