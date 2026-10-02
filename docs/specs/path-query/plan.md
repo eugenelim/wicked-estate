@@ -43,6 +43,13 @@ it needs no fence. The in-crate counts and the `ESTATE_TOOLS` roster inside the
 three MCP test files are the named exception above, and they move because the
 build requires it.
 
+*Superseded at merge (maintainers' review of #221): the documentation count and
+roster refresh was folded into this change after all, so `README.md`,
+`CLAUDE.md`, `docs/`, the MCP crate README and the site now count and list
+`Path`. Every statement below that excludes documentation counts (the
+durable-output map, T6 and Risks) describes the plan as written, not what
+landed; see the matching note in `spec.md`.*
+
 The riskiest part is not the algorithm — it is the count bump. Three separate test
 files pin the tool roster, and two of them state the arithmetic in their failure
 messages. Missing one leaves a red workspace; softening one to make the new tool

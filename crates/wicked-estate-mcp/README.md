@@ -18,7 +18,7 @@ MCP stdio server that exposes the wicked-estate retrieval tools to LLM agents ov
 | `handle_request_ctx(store, req, ctx)` | Like `handle_request` but injects `McpContext` (staleness + dim-guard); no live SemanticSearch. |
 | `handle_request_with_semantic(store, req, ctx, semantic)` | Full routing — injects context **and** the live `SemanticSearch` tool (the serving loop uses this). |
 | `McpContext` | Carries `commits_behind` plus the four `embedder_*` dim-guard fields (runtime vs store-meta id/dim). |
-| `all_tools()` | Returns the ten always-on estate `RetrievalTool` instances (no `SemanticSearch` — it is stateful). |
+| `all_tools()` | Returns the twelve always-on estate `RetrievalTool` instances (no `SemanticSearch` — it is stateful). |
 | `DomainHandles` | Bundles the memory engine and knowledge engine handles passed into the unified dispatch loop. |
 | `src/tools/memory.rs` | Dispatch path for the 7 memory tools (`memory.capture/recall/reflect/erase/learn/coverage/list`). |
 | `src/tools/knowledge.rs` | Dispatch path for the 7 knowledge tools (`knowledge.ingest/write/relate/recall/coverage/relate_code/recall_about_code`). |
