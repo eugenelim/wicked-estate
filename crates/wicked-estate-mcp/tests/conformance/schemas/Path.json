@@ -1,0 +1,37 @@
+{
+  "captured_from": "wicked-estate-mcp-0.16.7",
+  "description": "The ordered hops from one symbol to another — how A reaches B, not merely that it does. Each hop carries its edge kind, confidence, provenance and resolving tier, and both endpoints are denormalized (name, file, line), so an agent can name the intermediate functions and open only those files. Use this instead of reconstructing a route from TraverseGraph's edge list. `from` and `to` accept a symbol name or a SymbolId.",
+  "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+      "depth": {
+        "default": 8,
+        "description": "Maximum hop depth (default 8, min 1, max 16). A depth below 1 would expand nothing while reporting an unbounded search, so it is floored.",
+        "maximum": 16,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "from": {
+        "description": "Route start: an exact symbol name, or a SymbolId (the form SearchEntity and TraverseGraph return).",
+        "type": "string"
+      },
+      "max_nodes": {
+        "default": 1000,
+        "description": "Maximum nodes visited while searching (default 1000, min 1, max 5000).",
+        "maximum": 5000,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "to": {
+        "description": "Route end: an exact symbol name, or a SymbolId.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "from",
+      "to"
+    ],
+    "type": "object"
+  },
+  "name": "Path"
+}

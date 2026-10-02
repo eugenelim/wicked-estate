@@ -88,7 +88,12 @@ pub enum Provenance {
 }
 
 /// The kind of relationship. `Other(String)` carries non-code edges (event-bus, dispatch, …).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// `Ord` is derived so callers can break ties on edge kind without allocating — the path
+/// query's adjacency sort does, once per comparison over every admissible edge. The order is
+/// declaration order and carries no meaning beyond being total and stable; do not read
+/// precedence into it, and do not reorder the variants to express one.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EdgeKind {
     Contains,

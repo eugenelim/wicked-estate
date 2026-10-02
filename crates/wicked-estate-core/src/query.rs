@@ -131,6 +131,98 @@ impl Subgraph {
     pub fn truncation_invariant_holds(&self) -> bool {
         self.truncated == (self.node_cap_reached || self.depth_horizon_reached)
     }
+
+    /// The shortest hop sequence from `from` to whichever of `targets` is reached first,
+    /// following `source → target` (the dependency orientation), or `None` when this
+    /// subgraph holds no such route.
+    ///
+    /// Only edges whose endpoints are **both nodes of this subgraph** are walked. Backends
+    /// differ in which frontier-exterior edges they induce — `SqliteStore` returns every
+    /// neighbour of every reached node, including hops leaving the `max_depth` frontier to
+    /// symbols it does not return as nodes, while `MemStore` stops at the frontier — so an
+    /// unfiltered walk over [`Subgraph::edges`] would answer differently per backend and
+    /// could emit a hop with no `Node` to denormalize.
+    ///
+    /// Deterministic: the adjacency is built in a stable order, so the same subgraph always
+    /// yields the same route. `targets` is the whole resolved candidate set; passing a
+    /// one-element slice is the ordinary case. An empty `targets`, or a `from` that is not a
+    /// node here, yields `None`; `from` among `targets` yields `Some(vec![])`.
+    pub fn shortest_path(&self, from: &SymbolId, targets: &[SymbolId]) -> Option<Vec<Edge>> {
+        let node_set: std::collections::HashSet<&SymbolId> =
+            self.nodes.iter().map(|n| &n.symbol).collect();
+        if !node_set.contains(from) {
+            return None;
+        }
+        let goals: std::collections::HashSet<&SymbolId> =
+            targets.iter().filter(|t| node_set.contains(*t)).collect();
+        if goals.is_empty() {
+            return None;
+        }
+        if goals.contains(from) {
+            return Some(Vec::new());
+        }
+
+        // Stable adjacency (D4): sort by (source, target, kind) so BFS visitation order is a
+        // property of the data, never of a hash seed. Admit an edge only when both endpoints
+        // are subgraph nodes (D1a).
+        let mut admissible: Vec<&Edge> = self
+            .edges
+            .iter()
+            .filter(|e| node_set.contains(&e.source) && node_set.contains(&e.target))
+            .collect();
+        // The kind tie-break uses `EdgeKind`'s derived `Ord` rather than formatting both
+        // kinds per comparison, which heap-allocated twice for every comparison in a sort
+        // over every admissible edge. Dropping the tie-break instead would be cheaper still
+        // and would quietly lose the determinism this sort exists for: parallel edges
+        // sharing both endpoints would then order by however the backend returned them.
+        admissible.sort_by(|a, b| {
+            a.source
+                .0
+                .cmp(&b.source.0)
+                .then_with(|| a.target.0.cmp(&b.target.0))
+                .then_with(|| a.kind.cmp(&b.kind))
+        });
+        let mut adjacency: std::collections::BTreeMap<&SymbolId, Vec<&Edge>> =
+            std::collections::BTreeMap::new();
+        for e in admissible {
+            adjacency.entry(&e.source).or_default().push(e);
+        }
+
+        // BFS from `from`, recording the edge each node was first reached by.
+        let mut came_from: std::collections::HashMap<&SymbolId, &Edge> =
+            std::collections::HashMap::new();
+        let mut seen: std::collections::HashSet<&SymbolId> = std::collections::HashSet::new();
+        seen.insert(from);
+        let mut queue: std::collections::VecDeque<&SymbolId> = std::collections::VecDeque::new();
+        queue.push_back(from);
+
+        while let Some(current) = queue.pop_front() {
+            for e in adjacency.get(current).into_iter().flatten() {
+                let next = &e.target;
+                if !seen.insert(next) {
+                    continue;
+                }
+                came_from.insert(next, e);
+                if goals.contains(next) {
+                    // Walk the predecessor chain back to `from`, then reverse.
+                    let mut hops: Vec<Edge> = Vec::new();
+                    let mut cursor = next;
+                    while let Some(edge) = came_from.get(cursor) {
+                        hops.push((*edge).clone());
+                        cursor = &edge.source;
+                        if cursor == from {
+                            break;
+                        }
+                    }
+                    hops.reverse();
+                    return Some(hops);
+                }
+                queue.push_back(next);
+            }
+        }
+        None
+    }
+
     /// The dependent list of a blast-radius traversal, with import-transit File nodes cut
     /// (contains-aware rule; lane relative-imports Decision G, PER-1).
     ///
@@ -539,5 +631,209 @@ mod code_dependents_tests {
             !ids.contains(&file_transit.as_str()),
             "an import-only transit File is still dropped: {ids:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod shortest_path_tests {
+    use super::*;
+    use crate::edge::ResolutionTier;
+    use crate::node::Location;
+
+    fn sym(s: &str) -> SymbolId {
+        SymbolId(s.into())
+    }
+
+    fn node(id: &SymbolId) -> Node {
+        Node::new(
+            id.clone(),
+            NodeKind::Function,
+            id.as_str(),
+            Language::new("rust"),
+            Location::new("a.rs", crate::node::Span::ZERO),
+        )
+    }
+
+    fn edge(source: &SymbolId, target: &SymbolId) -> Edge {
+        Edge::new(
+            source.clone(),
+            target.clone(),
+            EdgeKind::Calls,
+            ResolutionTier::Parsed,
+            "test",
+        )
+    }
+
+    /// Build a subgraph whose node set is exactly `node_ids` and whose edges are `pairs`.
+    /// `pairs` may name an endpoint absent from `node_ids` — that is the frontier-exterior
+    /// shape `SqliteStore` produces and D1a filters.
+    fn subgraph(node_ids: &[&str], pairs: &[(&str, &str)]) -> Subgraph {
+        Subgraph {
+            nodes: node_ids.iter().map(|i| node(&sym(i))).collect(),
+            edges: pairs.iter().map(|(s, t)| edge(&sym(s), &sym(t))).collect(),
+            depths: BTreeMap::new(),
+            ..Default::default()
+        }
+    }
+
+    fn hop_ids(hops: &[Edge]) -> Vec<(String, String)> {
+        hops.iter()
+            .map(|e| (e.source.0.clone(), e.target.0.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn chain_returns_hops_in_order() {
+        let g = subgraph(&["A", "B", "C", "D"], &[("A", "B"), ("B", "C"), ("C", "D")]);
+        let hops = g
+            .shortest_path(&sym("A"), &[sym("D")])
+            .expect("route exists");
+        assert_eq!(
+            hop_ids(&hops),
+            vec![
+                ("A".to_string(), "B".to_string()),
+                ("B".to_string(), "C".to_string()),
+                ("C".to_string(), "D".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn diamond_is_two_hops_and_deterministic() {
+        let g = subgraph(
+            &["A", "B", "C", "D"],
+            &[("A", "B"), ("B", "D"), ("A", "C"), ("C", "D")],
+        );
+        let first = g
+            .shortest_path(&sym("A"), &[sym("D")])
+            .expect("route exists");
+        let second = g
+            .shortest_path(&sym("A"), &[sym("D")])
+            .expect("route exists");
+        assert_eq!(
+            first.len(),
+            2,
+            "shortest route through a diamond is two hops"
+        );
+        assert_eq!(
+            hop_ids(&first),
+            hop_ids(&second),
+            "the same subgraph must yield the identical hop sequence (D4)"
+        );
+    }
+
+    #[test]
+    fn same_start_and_target_is_zero_hops() {
+        let g = subgraph(&["A", "B"], &[("A", "B")]);
+        assert_eq!(g.shortest_path(&sym("A"), &[sym("A")]), Some(vec![]));
+    }
+
+    #[test]
+    fn no_route_returns_none() {
+        let g = subgraph(&["A", "B", "Z"], &[("A", "B")]);
+        assert_eq!(g.shortest_path(&sym("A"), &[sym("Z")]), None);
+    }
+
+    /// D1a: `SqliteStore` induces edges to symbols outside the returned node set. A hop whose
+    /// endpoint is not a subgraph node is inadmissible, so `E` is unreachable — while the
+    /// route to `D`, whose endpoints are all nodes, is unaffected.
+    #[test]
+    fn edge_to_non_node_endpoint_is_inadmissible() {
+        let g = subgraph(
+            &["A", "B", "C", "D"],
+            &[("A", "B"), ("B", "C"), ("C", "D"), ("D", "E")],
+        );
+        assert_eq!(
+            g.shortest_path(&sym("A"), &[sym("E")]),
+            None,
+            "E is not a subgraph node, so the D→E hop must not be walked"
+        );
+        assert_eq!(
+            g.shortest_path(&sym("A"), &[sym("D")]).map(|h| h.len()),
+            Some(3),
+            "filtering the frontier-exterior edge must not disturb the real route"
+        );
+    }
+
+    /// The kind tie-break, which is the sole consumer of `EdgeKind`'s derived `Ord`.
+    ///
+    /// It decides only between two admissible edges sharing BOTH endpoints with different
+    /// kinds — a source that both calls and references the same target. Every other fixture
+    /// builds `Calls` edges only, so without this shape the tie-break key could be deleted
+    /// (and the spine derive with it) and nothing would notice.
+    #[test]
+    fn parallel_edges_of_different_kinds_resolve_deterministically() {
+        let mut g = subgraph(&["A", "B"], &[]);
+        let mut calls = edge(&sym("A"), &sym("B"));
+        calls.kind = EdgeKind::Calls;
+        let mut references = edge(&sym("A"), &sym("B"));
+        references.kind = EdgeKind::References;
+
+        // Both insertion orders must pick the same edge.
+        g.edges = vec![references.clone(), calls.clone()];
+        let first = g.shortest_path(&sym("A"), &[sym("B")]).expect("route");
+        g.edges = vec![calls, references];
+        let second = g.shortest_path(&sym("A"), &[sym("B")]).expect("route");
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(
+            first[0].kind, second[0].kind,
+            "which of two parallel edges the route carries must be a property of the data; \
+             `Calls` sorts before `References` by declaration order in EdgeKind"
+        );
+        assert_eq!(
+            first[0].kind,
+            EdgeKind::Calls,
+            "declaration order decides, and `Calls` is declared first — if this fails \
+             because EdgeKind's variants were reordered, that reordering silently changed \
+             which parallel edge every path query returns"
+        );
+    }
+
+    /// The adjacency sort's reason to exist: the route must not depend on the order the
+    /// backend happened to return `edges` in. Two subgraphs identical except for edge and
+    /// node order must give the identical hop sequence.
+    ///
+    /// The diamond-determinism test above cannot catch this — it calls `shortest_path`
+    /// twice on the *same* `Subgraph` value, which any pure function satisfies. Deleting or
+    /// reversing the sort leaves that test green and this one red.
+    #[test]
+    fn hop_sequence_is_independent_of_edge_and_node_order() {
+        // A diamond with two equally short routes: the tie is decided by visitation order,
+        // so it is exactly where an unsorted adjacency shows through.
+        let pairs = [("A", "B"), ("A", "C"), ("B", "D"), ("C", "D")];
+        let ids = ["A", "B", "C", "D"];
+
+        let forward = subgraph(&ids, &pairs);
+        let mut reversed_pairs = pairs;
+        reversed_pairs.reverse();
+        let mut reversed_ids = ids;
+        reversed_ids.reverse();
+        let reversed = subgraph(&reversed_ids, &reversed_pairs);
+
+        let a = forward
+            .shortest_path(&sym("A"), &[sym("D")])
+            .expect("route exists");
+        let b = reversed
+            .shortest_path(&sym("A"), &[sym("D")])
+            .expect("route exists");
+        assert_eq!(
+            hop_ids(&a),
+            hop_ids(&b),
+            "the same graph in a different edge/node order must yield the same route; \
+             without the adjacency sort the tie flips with input order, and the two \
+             backends return edges in different orders"
+        );
+    }
+
+    /// The slice signature exists so one BFS can stop at whichever candidate is reached
+    /// first (D2); a per-candidate loop would answer a different question.
+    #[test]
+    fn nearest_target_candidate_wins() {
+        let g = subgraph(&["A", "B", "C", "D"], &[("A", "B"), ("B", "C"), ("C", "D")]);
+        let hops = g
+            .shortest_path(&sym("A"), &[sym("D"), sym("B")])
+            .expect("route exists");
+        assert_eq!(hop_ids(&hops), vec![("A".to_string(), "B".to_string())]);
     }
 }

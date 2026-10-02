@@ -107,6 +107,9 @@ wicked-estate index ../wicked-vault  --db graph.db --repo vault
 # Who/what depends on a symbol (blast radius = transitive dependents)
 wicked-estate blast-radius MyClass --db graph.db
 
+# How does A reach B? The ordered hops, each with its edge confidence
+wicked-estate path http_handler db_write --db graph.db
+
 # Find a symbol + print its source
 wicked-estate query handleRequest --db graph.db
 wicked-estate source handleRequest --db graph.db
@@ -154,9 +157,9 @@ wicked-estate watch ./my-project --db graph.db
 - **Rules engine layer** — IBM ODM BAL/IRL, Camunda DMN, CLIPS/Jess, Drools GDST, Excel/XLSX decision tables, Salesforce Flow, AWS Config Rules, Azure Policy extracted into the same graph as code. NodeKind::{Rule,RuleSet,Condition,Action,Fact} + EdgeKind::{Governs,Evaluates,Produces,InvokedBy}. `RulesInventory` MCP tool lists engines + calling code. `RulesBridgeResolver` connects code call sites to real RuleSet nodes.
 - **Hybrid + semantic retrieval** — graph + FTS5 core, embeddings an optional sidecar fused via RRF.
   Three embedder tiers: lexical (default) → model2vec (static, light) → fastembed (ONNX/BGE).
-- **MCP server** — exposes **29 tools across 3 domains** (estate, memory, knowledge) to agents over
+- **MCP server** — exposes **30 tools across 3 domains** (estate, memory, knowledge) to agents over
   JSON-RPC, following a strict runtime-behavior contract (cap output, report staleness, never
-  error-early, label confidence): 11 estate tools (SearchEntity, RetrieveEntity, TraverseGraph,
+  error-early, label confidence): 12 estate tools (SearchEntity, RetrieveEntity, TraverseGraph, Path,
   BlastRadius, FetchContent, ContextBundle, RulesInventory, rules.recall, RankHotspots, Communities,
   Lineage), 7 memory tools (memory.capture/recall/reflect/erase/learn/coverage/list) plus the
   memory-domain proposal queue's 4 tools (proposal.submit/list/approve/reject), and 7 knowledge
@@ -197,9 +200,9 @@ swappable impl behind a seam:
 
 ## MCP
 
-`wicked-estate-mcp` is a stdio MCP server (JSON-RPC 2.0) exposing **29 tools across 3 domains**:
+`wicked-estate-mcp` is a stdio MCP server (JSON-RPC 2.0) exposing **30 tools across 3 domains**:
 
-- **Estate** (11 tools): `SearchEntity`, `RetrieveEntity`, `TraverseGraph`, `BlastRadius`, `FetchContent`, `ContextBundle`, `RulesInventory`, `rules.recall`, `RankHotspots`, `Communities`, `Lineage`
+- **Estate** (12 tools): `SearchEntity`, `RetrieveEntity`, `TraverseGraph`, `Path`, `BlastRadius`, `FetchContent`, `ContextBundle`, `RulesInventory`, `rules.recall`, `RankHotspots`, `Communities`, `Lineage`
 - **Memory** (7 tools): `memory.capture`, `memory.recall`, `memory.reflect`, `memory.erase`, `memory.learn`, `memory.coverage`, `memory.list`
 - **Knowledge** (7 tools): `knowledge.ingest`, `knowledge.write`, `knowledge.relate`, `knowledge.recall`, `knowledge.coverage`, `knowledge.relate_code`, `knowledge.recall_about_code`
 - **Proposal queue** (4 tools, memory-domain): `proposal.submit`, `proposal.list`, `proposal.approve`, `proposal.reject`

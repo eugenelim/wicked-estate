@@ -35,6 +35,31 @@ Breaking for Rust callers, so the next release is 0.18.0, not 0.17.x. See **Chan
 - **SurrealStore compiles and passes the `GraphStore` conformance kit again, in a new
   `surrealdb backend` CI lane (#222).** It had not built since the surrealdb 3.2 bump, and its
   upserts had been silently writing nothing.
+- **A path query — the route from A to B, not just that B is reachable (#192).** New CLI
+  command `wicked-estate path <from> <to> [--max-depth N] [--json]` and new MCP tool `Path`,
+  returning the ordered hops rather than a reachability set, so an agent can name the
+  intermediate functions and read only those files. Each hop carries its edge kind,
+  confidence, provenance and resolving tier, and both endpoints are denormalized (name,
+  file, line) — no follow-up lookup per hop. `<from>` and `<to>` accept a symbol name or a
+  `SymbolId`, the form `SearchEntity` and `TraverseGraph` already return. `--max-depth`
+  accepts `1..=16`, defaults to 12, and clamps above 16; the MCP tool defaults to depth 8
+  with a `max_nodes` budget, matching `BlastRadius`.
+
+  Absence is reported honestly: an unresolvable input, a search cut off by its depth or node
+  bound, and a genuinely empty result are three distinct outcomes that never look alike
+  (R3). The two bound flags are the disjunction across candidate traversals, so a
+  multi-match name whose other candidate was cut off never reports a proven absence.
+
+  Implemented over one bounded `traverse` per resolved start symbol — no new `GraphRead`
+  method, no store change, no per-node query.
+
+  A bare name never resolves to one of #207's synthetic value-flow nodes (the 0.17.0 contract
+  that they are not name-addressable); pass the exact `SymbolId` to route from or to one. The
+  node-budget bound is read from `Subgraph::node_cap_reached`, so a depth cut is never reported
+  as an exhausted node budget. New public API in `wicked-estate-core`: `path_between`,
+  `PathResult` and `Unresolved` (both `#[non_exhaustive]`), `Subgraph::shortest_path`, and an
+  `Ord` derive on `EdgeKind`; parallel edges tie-break in variant declaration order. The MCP
+  server now lists 30 tools (12 estate).
 
 ### Fixed
 - **The BlastRadius depth flag describes the rows it returns (#222 review).** The horizon is
